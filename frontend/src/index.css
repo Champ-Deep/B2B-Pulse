@@ -1,0 +1,65 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-slate-50 text-brand-navy font-sans;
+  }
+}
+
+@layer utilities {
+  .brand-gradient {
+    background: linear-gradient(90deg, #FFB703 0%, #E8033A 50%, #6D08BE 100%);
+  }
+
+  .brand-text-gradient {
+    background: linear-gradient(90deg, #FFB703 0%, #E8033A 50%, #6D08BE 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .brand-border-gradient {
+    position: relative;
+    background: #fff;
+    background-clip: padding-box;
+    border: 2px solid transparent;
+    border-radius: 1.5rem;
+  }
+
+  .brand-border-gradient::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: -1;
+    margin: -2px;
+    border-radius: inherit;
+    background: linear-gradient(90deg, #FFB703, #E8033A, #6D08BE);
+  }
+
+  .btn-hover-effect {
+    @apply transition-all duration-300;
+  }
+
+  .btn-hover-effect:hover {
+    @apply -translate-y-0.5 shadow-lg brightness-110;
+  }
+}
+
+@keyframes slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(100%);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.animate-slide-in {
+  animation: slide-in 0.2s ease-out;
+}

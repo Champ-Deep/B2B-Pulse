@@ -1,0 +1,45 @@
+"""CSRF-safe OAuth state management using Redis.
+
+Generates cryptographically secure state tokens for OAuth flows,
+stored in Redis with a short TTL for single-use validation.
+"""
+
+import logging
+import secrets
+
+import redis.asyncio as aioredis
+
+from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+OAUTH_STATE_PREFIX = "oauth_state:"
+OAUTH_STATE_TTL = 600  # 10 minutes
+
+
+async def _get_redis() -> aioredis.Redis:
+    return aioredis.from_url(settings.redis_url, decode_responses=True)
+
+
+async def create_oauth_state(user_id: str) -> str:
+    """Generate a secure random state token and store user_id mapping in Redis."""
+    state = secrets.token_urlsafe(32)
+    r = await _get_redis()
+    try:
+        await r.setex(f"{OAUTH_STATE_PREFIX}{state}", OAUTH_STATE_TTL, user_id)
+    finally:
+        await r.aclose()
+    return state
+
+
+async def validate_oauth_state(state: str) -> str | None:
+    """Validate and consume an OAuth state token. Returns user_id or None."""
+    r = await _get_redis()
+    try:
+        key = f"{OAUTH_STATE_PREFIX}{state}"
+        user_id = await r.get(key)
+        if user_id:
+            await r.delete(key)  # Single-use: consume immediately
+        return user_id
+    finally:
+        await r.aclose()

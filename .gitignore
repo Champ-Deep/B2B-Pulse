@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Environment
+.env
+.env.local
+.env.*.local
+.env.prod
+.env.staging
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-compose.override.yml
+
+# Playwright
+playwright/.cache/
+
+# WhatsApp session
+whatsapp-sidecar/.wwebjs_auth/
+whatsapp-sidecar/.wwebjs_cache/
+
+# Build artifacts
+frontend/dist/
+
+# Test
+.coverage
+htmlcov/
+.pytest_cache/
+test.db
+
+# SSL certs
+nginx/ssl/*.pem
+nginx/ssl/*.key
+
+# Alembic
+backend/alembic/versions/__pycache__/
