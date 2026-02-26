@@ -11,10 +11,13 @@ logger = logging.getLogger(__name__)
 
 async def _get_user_cookies(user_id: str) -> list[dict] | None:
     """Load stored session cookies for a user's LinkedIn integration."""
+    import json
+
     from sqlalchemy import select
 
     from app.database import get_task_session
     from app.models.integration import IntegrationAccount, Platform
+    from app.core.security import decrypt_value
 
     async with get_task_session() as db:
         result = await db.execute(
@@ -25,7 +28,17 @@ async def _get_user_cookies(user_id: str) -> list[dict] | None:
         )
         integration = result.scalar_one_or_none()
         if integration and integration.session_cookies:
-            return integration.session_cookies
+            # Decrypt cookies if they're encrypted (encrypted cookies are strings)
+            cookies_data = integration.session_cookies
+            if isinstance(cookies_data, str):
+                # It's encrypted
+                try:
+                    decrypted = decrypt_value(cookies_data)
+                    return json.loads(decrypted)
+                except Exception:
+                    logger.warning(f"Failed to decrypt cookies for user {user_id}")
+                    return None
+            return cookies_data
     return None
 
 
@@ -54,36 +67,105 @@ async def check_session_valid(user_id: str) -> bool:
         await page.close()
 
 
-async def validate_session_cookies(cookies: list[dict]) -> bool:
-    """Validate LinkedIn session cookies by navigating to feed and checking for auth redirect."""
+async def validate_session_cookies(cookies: list[dict]) -> dict:
+    """Validate LinkedIn session cookies by navigating to feed and checking for auth redirect.
+
+    Returns a dict with:
+      - valid: bool
+      - user_name: str | None (display name if extracted)
+      - user_id: str | None (LinkedIn user ID if extracted)
+    """
+    import os
     import random
 
-    from app.automation.browser_manager import get_browser
+    from playwright.async_api import async_playwright
+    from app.automation.browser_manager import get_proxy_url
 
-    browser = await get_browser()
-    context = await browser.new_context(
-        user_agent=random.choice(
-            [
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            ]
-        ),
-        viewport={"width": 1920, "height": 1080},
+    result = {"valid": False, "user_name": None, "user_id": None}
+    pw = await async_playwright().start()
+
+    # Get proxy URL from env var
+    proxy_url = get_proxy_url()
+
+    launch_args = [
+        "--disable-blink-features=AutomationControlled",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+    ]
+
+    browser = await pw.chromium.launch(
+        headless=True,
+        args=launch_args,
     )
-    await context.add_cookies(cookies)
-    page = await context.new_page()
     try:
-        await page.goto(
-            "https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=15000
-        )
-        await human_delay(2, 4)
-        return not ("/login" in page.url or "/checkpoint" in page.url or "/authwall" in page.url)
-    except Exception as e:
-        logger.warning(f"Cookie validation navigation failed: {e}")
-        return False
+        context_kwargs = {
+            "user_agent": random.choice(
+                [
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                ]
+            ),
+            "viewport": {"width": 1920, "height": 1080},
+            "ignore_https_errors": True,
+        }
+
+        if proxy_url:
+            context_kwargs["proxy"] = {"server": proxy_url}
+
+        context = await browser.new_context(**context_kwargs)
+        await context.add_cookies(cookies)
+        page = await context.new_page()
+        try:
+            await page.goto(
+                "https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=15000
+            )
+            await asyncio.sleep(2)
+
+            # Check if redirected to login
+            if "/login" in page.url or "/checkpoint" in page.url or "/authwall" in page.url:
+                return result
+
+            result["valid"] = True
+
+            # Extract user info from the page
+            try:
+                # Try to find the profile name in the nav
+                profile_link = await page.query_selector(
+                    'a[href*="/in/"][data-test-nav-top-bar-profile-dropdown]'
+                )
+                if not profile_link:
+                    profile_link = await page.query_selector('button[aria-label*="Profile"]')
+                if not profile_link:
+                    profile_link = await page.query_selector(".feed-shared-update-v2__actor-meta a")
+
+                if profile_link:
+                    user_name = await profile_link.inner_text()
+                    if user_name:
+                        result["user_name"] = user_name.strip().split("\n")[0]
+            except Exception as e:
+                logger.debug(f"Could not extract user name: {e}")
+
+            # Try to get user ID from cookies
+            try:
+                all_cookies = await context.cookies()
+                for cookie in all_cookies:
+                    if cookie["name"] == "li_at":
+                        # The li_at value contains user info, but it's a JWT-like token
+                        # We can try to decode it to get user ID
+                        pass
+            except Exception:
+                pass
+
+            return result
+        except Exception as e:
+            logger.warning(f"Cookie validation navigation failed: {e}")
+            return result
+        finally:
+            await page.close()
+            await context.close()
     finally:
-        await page.close()
-        await context.close()
+        await browser.close()
+        await pw.stop()
 
 
 async def like_post(user_id: str, post_url: str) -> bool:
@@ -189,91 +271,123 @@ async def comment_on_post(user_id: str, post_url: str, comment_text: str) -> boo
 async def scrape_profile_posts(profile_url: str, cookies: list[dict] | None = None) -> list[dict]:
     """Scrape recent posts from a LinkedIn profile or company page.
 
-    If cookies (e.g. li_at, JSESSIONID) are provided the browser context will
-    be authenticated, which is far more reliable than anonymous scraping.
+    Launches a fresh Playwright browser per invocation to avoid state pollution
+    from any shared browser_manager.
     """
     import random
 
-    from app.automation.browser_manager import get_browser
-
-    browser = await get_browser()
-    context = await browser.new_context(
-        user_agent=random.choice(
-            [
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            ]
-        ),
-        viewport={"width": 1920, "height": 1080},
-    )
-    if cookies:
-        await context.add_cookies(cookies)
-    page = await context.new_page()
+    from playwright.async_api import async_playwright
+    from app.automation.browser_manager import get_proxy_url
 
     posts = []
+    ua = random.choice(
+        [
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        ]
+    )
+
+    pw = await async_playwright().start()
+
+    # Get proxy URL from env var
+    proxy_url = get_proxy_url()
+
+    browser = await pw.chromium.launch(
+        headless=True,
+        args=[
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+        ],
+    )
     try:
-        # Navigate to the profile's recent activity or posts page
+        context_kwargs = {
+            "user_agent": ua,
+            "viewport": {"width": 1920, "height": 1080},
+            "extra_http_headers": {"Accept-Language": "en-US,en;q=0.9"},
+            "ignore_https_errors": True,
+        }
+
+        if proxy_url:
+            context_kwargs["proxy"] = {"server": proxy_url}
+
+        context = await browser.new_context(**context_kwargs)
+        # Inject cookies BEFORE the first navigation so the session is recognised
+        if cookies:
+            await context.add_cookies(cookies)
+        await context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+        )
+
+        page = await context.new_page()
+
         posts_url = profile_url.rstrip("/")
         if "/company/" in posts_url:
             posts_url += "/posts/"
         else:
             posts_url += "/recent-activity/all/"
 
-        await page.goto(posts_url, wait_until="domcontentloaded", timeout=20000)
-        await human_delay(3, 6)
+        try:
+            await page.goto(posts_url, wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(3)
+        except Exception as nav_err:
+            logger.warning(f"Navigation to {posts_url} failed: {nav_err}")
+            return []
 
-        # Auth-wall detection
-        if "/login" in page.url or "/checkpoint" in page.url or "/authwall" in page.url:
+        final_url = page.url
+        logger.debug(f"Final URL: {final_url}")
+        if "/login" in final_url or "/checkpoint" in final_url or "/authwall" in final_url:
             logger.warning(
-                f"LinkedIn auth wall detected for {profile_url} — cookies missing or expired"
+                f"LinkedIn auth wall detected for {profile_url} — "
+                "li_at cookie may be expired. Go to Settings → LinkedIn → re-login."
             )
             return []
 
-        # Scroll down to load posts
         for _ in range(3):
             await page.evaluate("window.scrollBy(0, 800)")
-            await human_delay(1, 2)
+            await asyncio.sleep(1)
 
-        # Extract post elements
         post_elements = await page.query_selector_all(
-            'div[data-urn*="activity"], div.feed-shared-update-v2'
+            'div[data-urn*="activity"], '
+            "li.profile-creator-shared-feed-update__container, "
+            "div.feed-shared-update-v2, "
+            "div.occludable-update"
         )
+        logger.info(f"Found {len(post_elements)} post elements on {profile_url}")
 
-        for element in post_elements[:10]:  # Limit to 10 most recent
+        for element in post_elements[:10]:
             try:
-                # Extract post URL
                 link = await element.query_selector('a[href*="/feed/update/"]')
                 post_href = await link.get_attribute("href") if link else None
-
-                # Extract text content
                 text_el = await element.query_selector(
-                    '.feed-shared-update-v2__description, .update-components-text, span[dir="ltr"]'
+                    ".feed-shared-update-v2__description, "
+                    ".update-components-text, "
+                    'span[dir="ltr"], '
+                    ".attributed-text-segment-list__content"
                 )
                 text = await text_el.inner_text() if text_el else ""
-
-                # Extract URN/ID
                 data_urn = await element.get_attribute("data-urn")
                 external_id = data_urn or post_href or ""
-
                 if external_id:
                     posts.append(
                         {
                             "external_id": external_id,
-                            "url": f"https://www.linkedin.com{post_href}"
-                            if post_href and post_href.startswith("/")
-                            else post_href or profile_url,
-                            "content": text[:2000],  # Cap content length
+                            "url": (
+                                f"https://www.linkedin.com{post_href}"
+                                if post_href and post_href.startswith("/")
+                                else post_href or profile_url
+                            ),
+                            "content": text[:2000],
                         }
                     )
             except Exception as e:
                 logger.debug(f"Error extracting post element: {e}")
-                continue
 
     except Exception as e:
         logger.error(f"Error scraping profile {profile_url}: {e}")
     finally:
-        await page.close()
-        await context.close()
+        await browser.close()
+        await pw.stop()
 
     logger.info(f"Scraped {len(posts)} posts from {profile_url}")
     return posts

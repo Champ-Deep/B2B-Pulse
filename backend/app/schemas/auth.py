@@ -1,19 +1,6 @@
 import uuid
 
-from pydantic import BaseModel, EmailStr
-
-
-class SignupRequest(BaseModel):
-    email: EmailStr
-    password: str
-    full_name: str
-    org_name: str = ""
-    invite_code: str | None = None
-
-
-class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str
+from pydantic import BaseModel
 
 
 class TokenResponse(BaseModel):
@@ -33,5 +20,8 @@ class UserResponse(BaseModel):
     role: str
     org_id: uuid.UUID
     is_active: bool
+    team_id: uuid.UUID | None = None
+    is_platform_admin: bool = False
+    linkedin_id: str | None = None
 
     model_config = {"from_attributes": True}

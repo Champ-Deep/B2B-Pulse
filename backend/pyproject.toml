@@ -1,7 +1,7 @@
 [project]
-name = "autoengage-backend"
-version = "0.1.0"
-description = "AutoEngage - Social Engagement Automation Tool"
+name = "b2bpulse-backend"
+version = "1.0.0"
+description = "B2B Pulse - Social Engagement Automation Platform"
 requires-python = ">=3.11"
 dependencies = [
     # Web framework
@@ -20,8 +20,6 @@ dependencies = [
 
     # Auth & security
     "python-jose[cryptography]>=3.3.0",
-    "passlib[bcrypt]>=1.7.4",
-    "bcrypt>=4.0.0,<4.1.0",
     "cryptography>=43.0.0",
 
     # HTTP client

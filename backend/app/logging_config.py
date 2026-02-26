@@ -1,4 +1,4 @@
-"""Structured logging configuration for AutoEngage."""
+"""Structured logging configuration for B2B Pulse."""
 
 import json
 import logging

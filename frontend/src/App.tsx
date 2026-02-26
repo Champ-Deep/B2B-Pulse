@@ -9,12 +9,14 @@ import { ToastProvider } from './components/Toast'
 import Layout from './components/Layout'
 import Login from './pages/Login'
 import Signup from './pages/Signup'
+import AuthCallback from './pages/AuthCallback'
 import Dashboard from './pages/Dashboard'
 import Onboarding from './pages/Onboarding'
 import TrackedPages from './pages/TrackedPages'
 import AutomationSettings from './pages/AutomationSettings'
 import AuditLog from './pages/AuditLog'
 import Team from './pages/Team'
+import AdminDashboard from './pages/AdminDashboard'
 import B2BPulseProduct from './pages/B2BPulseProduct'
 
 function App() {
@@ -42,24 +44,10 @@ function App() {
     fetchUser()
   }, [fetchUser])
 
-  const login = async (email: string, password: string) => {
-    const { data } = await api.post('/auth/login', { email, password })
-    localStorage.setItem('access_token', data.access_token)
-    localStorage.setItem('refresh_token', data.refresh_token)
-    await fetchUser()
-  }
-
-  const signup = async (email: string, password: string, fullName: string, orgName: string, inviteCode?: string) => {
-    const { data } = await api.post('/auth/signup', {
-      email,
-      password,
-      full_name: fullName,
-      org_name: orgName,
-      invite_code: inviteCode || undefined,
-    })
-    localStorage.setItem('access_token', data.access_token)
-    localStorage.setItem('refresh_token', data.refresh_token)
-    await fetchUser()
+  const loginWithLinkedIn = async (inviteCode?: string) => {
+    const params = inviteCode ? `?invite_code=${inviteCode}` : ''
+    const { data } = await api.get(`/auth/linkedin${params}`)
+    window.location.href = data.auth_url
   }
 
   const logout = () => {
@@ -79,8 +67,9 @@ function App() {
   return (
     <ErrorBoundary>
       <ToastProvider>
-        <AuthContext.Provider value={{ user, isLoading, login, signup, logout }}>
+        <AuthContext.Provider value={{ user, isLoading, loginWithLinkedIn, logout }}>
           <Routes>
+            <Route path={ROUTES.AUTH_CALLBACK} element={<AuthCallback />} />
             <Route path={ROUTES.LOGIN} element={user ? <Navigate to={ROUTES.HOME} /> : <Login />} />
             <Route path={ROUTES.SIGNUP} element={user ? <Navigate to={ROUTES.HOME} /> : <Signup />} />
             <Route path={ROUTES.PRODUCT} element={<B2BPulseProduct />} />
@@ -91,6 +80,9 @@ function App() {
               <Route path={ROUTES.SETTINGS} element={<AutomationSettings />} />
               <Route path={ROUTES.TEAM} element={<Team />} />
               <Route path={ROUTES.AUDIT} element={<AuditLog />} />
+              {user?.is_platform_admin && (
+                <Route path={ROUTES.ADMIN} element={<AdminDashboard />} />
+              )}
             </Route>
           </Routes>
         </AuthContext.Provider>

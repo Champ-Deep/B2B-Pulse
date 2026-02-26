@@ -31,11 +31,12 @@ class WhatsAppLinkEvent(BaseModel):
     timestamp: str
 
 
-@router.post("/whatsapp-link")
+@router.post("/whatsapp-link", summary="Handle WhatsApp Link Event")
 async def handle_whatsapp_link(
     event: WhatsAppLinkEvent,
     db: AsyncSession = Depends(get_db),
 ):
+    """Process a social media link shared in a WhatsApp group."""
     parsed = urlparse(event.url)
     domain = parsed.netloc.lower()
 

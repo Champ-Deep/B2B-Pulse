@@ -3,13 +3,13 @@
 Architecture notes:
 - Uses asyncio.run() per invocation → requires get_task_session() for DB
   access (see engagement_tasks.py docstring for full rationale).
-- Imports are deferred inside async helpers to avoid circular imports and
-  keep Celery's module graph lean.
 - Beat schedule fires dispatch_poll_tasks which fans out individual
   poll_single_page_task calls — one per tracked page — so Celery workers
-  can poll pages in parallel instead of sequentially.
+  can poll pages in parallel.
 - Per-page Redis locks prevent duplicate polls when beat fires faster
   than pages can be scraped.
+- LinkedIn polling uses the OAuth REST API (not Playwright) to fetch posts
+  using the stored access_token from IntegrationAccount.
 """
 
 import asyncio
@@ -34,26 +34,75 @@ def dispatch_poll_tasks():
 
 
 async def _dispatch_polls():
+    import json
+
+    import redis as sync_redis
     from sqlalchemy import select
 
+    from app.config import settings
     from app.database import get_task_session
     from app.models.tracked_page import TrackedPage
+    from app.models.user import User, UserProfile
+
+    r = sync_redis.from_url(settings.redis_url)
 
     async with get_task_session() as db:
-        result = await db.execute(select(TrackedPage.id).where(TrackedPage.active.is_(True)))
-        page_ids = [str(row[0]) for row in result.all()]
+        result = await db.execute(
+            select(TrackedPage.id, TrackedPage.org_id).where(TrackedPage.active.is_(True))
+        )
+        pages = result.all()
 
-    for page_id in page_ids:
-        poll_single_page_task.delay(page_id)
+        # Cache org polling intervals to avoid repeated queries
+        org_intervals: dict[str, int] = {}
 
-    logger.info(f"Dispatched {len(page_ids)} individual poll tasks")
+        dispatched = 0
+        for page_id_val, org_id_val in pages:
+            page_id = str(page_id_val)
+            org_id = str(org_id_val)
+
+            # Get org's polling interval (cached per org)
+            if org_id not in org_intervals:
+                user_result = await db.execute(
+                    select(UserProfile)
+                    .join(User, User.id == UserProfile.user_id)
+                    .where(User.org_id == org_id_val, User.is_active.is_(True))
+                    .limit(1)
+                )
+                up = user_result.scalar_one_or_none()
+                interval = 300  # default 5 min
+                if up and up.automation_settings:
+                    interval = up.automation_settings.get("polling_interval", 300)
+                org_intervals[org_id] = interval
+
+            poll_interval = org_intervals[org_id]
+
+            # Check last poll time from Redis — skip if polled too recently
+            status_raw = r.get(f"autoengage:poll_status:{page_id}")
+            if status_raw:
+                try:
+                    from datetime import UTC, datetime
+
+                    status_data = json.loads(status_raw)
+                    last_polled = status_data.get("last_polled_at")
+                    if last_polled:
+                        last_dt = datetime.fromisoformat(last_polled)
+                        elapsed = (datetime.now(UTC) - last_dt).total_seconds()
+                        if elapsed < poll_interval - 30:  # 30s grace for scheduling jitter
+                            continue
+                except (json.JSONDecodeError, ValueError):
+                    pass
+
+            poll_single_page_task.delay(page_id)
+            dispatched += 1
+
+    logger.info(f"Dispatched {dispatched}/{len(pages)} poll tasks (respecting org intervals)")
 
 
 @celery_app.task(
     name="app.workers.polling_tasks.poll_single_page_task",
-    soft_time_limit=120,
-    time_limit=150,
-    max_retries=1,
+    soft_time_limit=60,   # Reduced from 120s — API calls are fast, no Playwright
+    time_limit=90,
+    max_retries=2,
     default_retry_delay=30,
 )
 def poll_single_page_task(tracked_page_id: str):
@@ -106,40 +155,44 @@ async def _poll_page_by_id(tracked_page_id: str):
             logger.debug(f"Tracked page {tracked_page_id} is inactive, skipping")
             return
 
+        poll_result: dict
         try:
             poll_result = await _poll_single_page(db, page)
-            r.set(
-                status_key,
-                json.dumps({
-                    "last_polled_at": datetime.now(UTC).isoformat(),
-                    "status": poll_result.get("status", "ok"),
-                    "posts_found": poll_result.get("posts_found", 0),
-                    "new_posts": poll_result.get("new_posts", 0),
-                    "error": poll_result.get("error"),
-                }),
-                ex=3600,
-            )
         except Exception as e:
             logger.warning(f"Error polling page {page.id} ({page.url}): {e}")
-            r.set(
-                status_key,
-                json.dumps({
-                    "last_polled_at": datetime.now(UTC).isoformat(),
-                    "status": "error",
-                    "posts_found": 0,
-                    "new_posts": 0,
-                    "error": str(e),
-                }),
-                ex=3600,
-            )
+            poll_result = {
+                "status": "error",
+                "posts_found": 0,
+                "new_posts": 0,
+                "error": str(e),
+            }
+
+        now_iso = datetime.now(UTC).isoformat()
+        status_payload = {
+            "last_polled_at": now_iso,
+            "status": poll_result.get("status", "ok"),
+            "posts_found": poll_result.get("posts_found", 0),
+            "new_posts": poll_result.get("new_posts", 0),
+            "error": poll_result.get("error"),
+        }
+
+        # Write to Redis (short-term, for fast UI reads)
+        r.set(status_key, json.dumps(status_payload), ex=86400)  # 24hr TTL
+
+        # Write to DB (persistent — survives Redis flush/TTL)
+        page.last_polled_at = datetime.now(UTC)
+        page.last_poll_status = poll_result.get("status", "ok")[:50]
 
         await db.commit()
 
 
 async def _poll_single_page(db, page) -> dict:
-    """Poll a single tracked page for new posts using Playwright or Graph API.
+    """Poll a single tracked page for new posts.
 
-    Returns a status dict with keys: status, posts_found, new_posts, error.
+    LinkedIn: uses OAuth REST API (access_token from IntegrationAccount).
+    Meta: uses Graph API for business pages, Playwright for personal.
+
+    Returns a status dict: {status, posts_found, new_posts, error}.
     """
     from sqlalchemy import select
 
@@ -149,26 +202,12 @@ async def _poll_single_page(db, page) -> dict:
 
     logger.info(f"Polling page: {page.name} ({page.url})")
 
-    posts_data = []
+    posts_data: list[dict] = []
 
     if page.platform == Platform.LINKEDIN:
-        from app.automation.linkedin_actions import scrape_profile_posts
-
-        li_cookies = await _get_linkedin_cookies(db, page.org_id)
-        if li_cookies is None:
-            logger.warning(
-                f"Skipping LinkedIn poll for {page.url}: no session cookies configured. "
-                "A user must paste their li_at cookie in Settings."
-            )
-            return {"status": "no_cookies", "posts_found": 0, "new_posts": 0, "error": None}
-        try:
-            posts_data = await scrape_profile_posts(page.url, cookies=li_cookies)
-        except Exception as e:
-            logger.warning(f"Playwright scrape failed for {page.url}: {e}")
-            return {"status": "error", "posts_found": 0, "new_posts": 0, "error": str(e)}
+        posts_data = await _poll_linkedin_api(db, page)
 
     elif page.platform == Platform.META:
-        # Try Graph API first for business accounts, fall back to Playwright
         if page.page_type in (PageType.IG_BUSINESS, PageType.FB_PAGE):
             posts_data = await _poll_meta_api(db, page)
         else:
@@ -181,14 +220,12 @@ async def _poll_single_page(db, page) -> dict:
 
     new_count = 0
     for post_data in posts_data:
-        # Check if we already know about this post
         result = await db.execute(
             select(Post).where(Post.external_post_id == post_data["external_id"])
         )
         if result.scalar_one_or_none():
             continue
 
-        # New post found — use IntegrityError catch for race condition safety
         post = Post(
             tracked_page_id=page.id,
             platform=page.platform,
@@ -207,7 +244,6 @@ async def _poll_single_page(db, page) -> dict:
         new_count += 1
         logger.info(f"New post detected: {post.url}")
 
-        # Enqueue engagement jobs
         from app.workers.engagement_tasks import schedule_staggered_engagements
 
         schedule_staggered_engagements.delay(str(post.id), str(page.id))
@@ -215,8 +251,84 @@ async def _poll_single_page(db, page) -> dict:
     return {"status": "ok", "posts_found": len(posts_data), "new_posts": new_count, "error": None}
 
 
+# ---------------------------------------------------------------------------
+# LinkedIn API polling (replaces Playwright scraping)
+# ---------------------------------------------------------------------------
+
+
+async def _get_linkedin_access_token(db, org_id) -> str | None:
+    """Return a decrypted LinkedIn OAuth access token for any active org member.
+
+    Prefers tokens that haven't expired yet.
+    """
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+
+    from app.core.security import decrypt_value
+    from app.models.integration import IntegrationAccount, Platform
+    from app.models.user import User
+
+    result = await db.execute(
+        select(IntegrationAccount)
+        .join(User, User.id == IntegrationAccount.user_id)
+        .where(
+            User.org_id == org_id,
+            IntegrationAccount.platform == Platform.LINKEDIN,
+            IntegrationAccount.is_active.is_(True),
+            IntegrationAccount.access_token.isnot(None),
+        )
+        .order_by(IntegrationAccount.token_expires_at.desc())  # Prefer freshest token
+        .limit(1)
+    )
+    integration = result.scalar_one_or_none()
+    if not integration:
+        return None
+
+    # Warn if token may be expired
+    if integration.token_expires_at and integration.token_expires_at < datetime.now(UTC):
+        logger.warning(
+            f"LinkedIn token for org {org_id} may be expired "
+            f"(expires_at={integration.token_expires_at}). Attempting anyway."
+        )
+
+    try:
+        return decrypt_value(integration.access_token)
+    except Exception as e:
+        logger.error(f"Failed to decrypt LinkedIn access token for org {org_id}: {e}")
+        return None
+
+
+async def _poll_linkedin_api(db, page) -> list[dict]:
+    """Fetch recent LinkedIn posts using stored session cookies via Playwright.
+
+    Falls back gracefully if no cookies are present (directing users to sign in again).
+    """
+    from app.models.tracked_page import PageType
+
+    cookies = await _get_linkedin_cookies(db, page.org_id)
+    if not cookies:
+        logger.warning(
+            f"No LinkedIn session cookies for org {page.org_id}. "
+            "User must re-authenticate via Sign in with LinkedIn to refresh cookies."
+        )
+        return []
+
+    logger.info(f"Polling LinkedIn page via Playwright: {page.name} ({page.url})")
+    from app.automation.linkedin_actions import scrape_profile_posts
+
+    try:
+        return await scrape_profile_posts(page.url, cookies=cookies)
+    except Exception as e:
+        logger.warning(f"Playwright scrape failed for {page.url}: {e}")
+        return []
+
+
 async def _get_linkedin_cookies(db, org_id) -> list[dict] | None:
-    """Find LinkedIn session cookies from any org member's integration."""
+    """Return LinkedIn session cookies for any active org member.
+
+    Returns cookies in Playwright format: list of {name, value, domain, path}.
+    """
     from sqlalchemy import select
 
     from app.models.integration import IntegrationAccount, Platform
@@ -234,17 +346,24 @@ async def _get_linkedin_cookies(db, org_id) -> list[dict] | None:
         .limit(1)
     )
     integration = result.scalar_one_or_none()
-    if integration and integration.session_cookies:
-        cookies = integration.session_cookies
-        # Ensure cookies are in Playwright format (list of dicts with name, value, domain)
-        if isinstance(cookies, list):
-            return cookies
-        elif isinstance(cookies, dict):
-            return [
-                {"name": k, "value": v, "domain": ".linkedin.com", "path": "/"}
-                for k, v in cookies.items()
-            ]
+    if not integration or not integration.session_cookies:
+        return None
+
+    cookies = integration.session_cookies
+    # Normalise to Playwright format
+    if isinstance(cookies, list):
+        return cookies
+    elif isinstance(cookies, dict):
+        return [
+            {"name": k, "value": v, "domain": ".linkedin.com", "path": "/"}
+            for k, v in cookies.items()
+        ]
     return None
+
+
+# ---------------------------------------------------------------------------
+# Meta API polling (unchanged)
+# ---------------------------------------------------------------------------
 
 
 async def _poll_meta_api(db, page):
@@ -255,7 +374,6 @@ async def _poll_meta_api(db, page):
     from app.models.integration import IntegrationAccount, Platform
     from app.models.tracked_page import PageType
 
-    # Find any Meta integration that has access (use the org's first connected Meta account)
     result = await db.execute(
         select(IntegrationAccount).where(
             IntegrationAccount.platform == Platform.META,

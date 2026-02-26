@@ -12,6 +12,7 @@ from app.database import Base
 class UserRole(str, enum.Enum):
     OWNER = "owner"
     ADMIN = "admin"
+    TEAM_LEADER = "team_leader"
     MEMBER = "member"
     ANALYST = "analyst"
 
@@ -24,14 +25,19 @@ class User(Base):
         UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False
     )
     email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False, index=True)
-    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    hashed_password: Mapped[str | None] = mapped_column(String(255), nullable=True)
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    linkedin_id: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True, index=True)
     role: Mapped[UserRole] = mapped_column(
         Enum(UserRole, values_callable=lambda x: [e.value for e in x]),
         nullable=False,
         default=UserRole.MEMBER,
     )
     is_active: Mapped[bool] = mapped_column(default=True)
+    is_platform_admin: Mapped[bool] = mapped_column(default=False, server_default="false")
+    team_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("teams.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
@@ -48,6 +54,7 @@ class User(Base):
     engagement_actions: Mapped[list["EngagementAction"]] = relationship(  # noqa: F821
         back_populates="user"
     )
+    team: Mapped["Team | None"] = relationship(back_populates="members")  # noqa: F821
 
 
 class UserProfile(Base):

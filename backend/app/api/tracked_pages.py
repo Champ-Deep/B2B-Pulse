@@ -36,12 +36,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/tracked-pages", tags=["tracked-pages"])
 
 
-@router.post("", response_model=TrackedPageResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=TrackedPageResponse, status_code=status.HTTP_201_CREATED, summary="Create Tracked Page")
 async def create_tracked_page(
     request: TrackedPageCreate,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Add a new social media page to track for auto-engagement."""
     try:
         platform = detect_platform(request.url)
     except ValueError as exc:
@@ -97,11 +98,12 @@ async def create_tracked_page(
     return page
 
 
-@router.get("", response_model=list[TrackedPageResponse])
+@router.get("", response_model=list[TrackedPageResponse], summary="List Tracked Pages")
 async def list_tracked_pages(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """List all tracked pages for the current user's organization."""
     result = await db.execute(
         select(TrackedPage)
         .where(TrackedPage.org_id == current_user.org_id)
@@ -110,13 +112,14 @@ async def list_tracked_pages(
     return result.scalars().all()
 
 
-@router.put("/{page_id}", response_model=TrackedPageResponse)
+@router.put("/{page_id}", response_model=TrackedPageResponse, summary="Update Tracked Page")
 async def update_tracked_page(
     page_id: uuid.UUID,
     request: TrackedPageUpdate,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Update a tracked page's name or active status."""
     result = await db.execute(
         select(TrackedPage).where(
             TrackedPage.id == page_id, TrackedPage.org_id == current_user.org_id
@@ -133,12 +136,13 @@ async def update_tracked_page(
     return page
 
 
-@router.delete("/{page_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{page_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete Tracked Page")
 async def delete_tracked_page(
     page_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Delete a tracked page and its subscriptions."""
     result = await db.execute(
         select(TrackedPage).where(
             TrackedPage.id == page_id, TrackedPage.org_id == current_user.org_id
@@ -150,13 +154,14 @@ async def delete_tracked_page(
     await db.delete(page)
 
 
-@router.post("/{page_id}/subscribe", response_model=SubscriptionResponse, status_code=201)
+@router.post("/{page_id}/subscribe", response_model=SubscriptionResponse, status_code=201, summary="Subscribe to Tracked Page")
 async def subscribe_to_page(
     page_id: uuid.UUID,
     request: SubscriptionCreate,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Subscribe the current user to a tracked page for auto-engagement."""
     result = await db.execute(
         select(TrackedPage).where(
             TrackedPage.id == page_id, TrackedPage.org_id == current_user.org_id
@@ -187,13 +192,14 @@ async def subscribe_to_page(
     return sub
 
 
-@router.put("/{page_id}/subscribe", response_model=SubscriptionResponse)
+@router.put("/{page_id}/subscribe", response_model=SubscriptionResponse, summary="Update Page Subscription")
 async def update_subscription(
     page_id: uuid.UUID,
     request: SubscriptionCreate,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Update subscription settings for a tracked page."""
     result = await db.execute(
         select(TrackedPageSubscription).where(
             TrackedPageSubscription.tracked_page_id == page_id,
@@ -214,7 +220,7 @@ async def update_subscription(
 # --- CSV/Excel Bulk Import ---
 
 
-@router.post("/import", response_model=ImportResult)
+@router.post("/import", response_model=ImportResult, summary="Bulk Import Tracked Pages")
 async def import_tracked_pages(
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
@@ -338,7 +344,7 @@ async def import_tracked_pages(
 # --- Manual Post URL Submission ---
 
 
-@router.post("/{page_id}/submit-post", status_code=201)
+@router.post("/{page_id}/submit-post", status_code=201, summary="Submit Post URL")
 async def submit_post_url(
     page_id: uuid.UUID,
     request: PostSubmitRequest,
@@ -391,7 +397,7 @@ async def submit_post_url(
 # --- Poll Now ---
 
 
-@router.post("/{page_id}/poll-now")
+@router.post("/{page_id}/poll-now", summary="Poll Page Now")
 async def poll_page_now(
     page_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
@@ -418,7 +424,7 @@ async def poll_page_now(
 # --- Page Posts with Engagement Status ---
 
 
-@router.get("/{page_id}/posts", response_model=list[PostWithEngagements])
+@router.get("/{page_id}/posts", response_model=list[PostWithEngagements], summary="Get Page Posts")
 async def get_page_posts(
     page_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
@@ -477,13 +483,17 @@ async def get_page_posts(
 # --- Poll Status ---
 
 
-@router.get("/{page_id}/poll-status")
+@router.get("/{page_id}/poll-status", summary="Get Poll Status")
 async def get_poll_status(
     page_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get the last poll status for a tracked page (stored in Redis)."""
+    """Get the last poll status for a tracked page.
+
+    Reads from Redis first (fast path). Falls back to the DB columns
+    `last_polled_at` / `last_poll_status` when the Redis key has expired.
+    """
     import json
 
     import redis as sync_redis
@@ -495,11 +505,25 @@ async def get_poll_status(
             TrackedPage.id == page_id, TrackedPage.org_id == current_user.org_id
         )
     )
-    if not result.scalar_one_or_none():
+    page = result.scalar_one_or_none()
+    if not page:
         raise HTTPException(status_code=404, detail="Tracked page not found")
 
+    # Fast path: Redis
     r = sync_redis.from_url(settings.redis_url)
     raw = r.get(f"autoengage:poll_status:{page_id}")
     if raw:
         return json.loads(raw)
+
+    # Fallback: DB persistent columns
+    if page.last_polled_at:
+        return {
+            "status": page.last_poll_status or "ok",
+            "last_polled_at": page.last_polled_at.isoformat(),
+            "posts_found": None,
+            "new_posts": None,
+            "error": None,
+        }
+
     return {"status": "never_polled"}
+

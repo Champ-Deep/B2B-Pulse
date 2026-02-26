@@ -10,13 +10,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.dependencies import get_current_user
 from app.database import get_db
 from app.models.engagement import AuditLog, EngagementAction
+from app.models.post import Post
+from app.models.tracked_page import TrackedPage
 from app.models.user import User
-from app.schemas.engagement import AuditLogResponse
+from app.schemas.engagement import ActivityFeedItem, AuditLogResponse
 
 router = APIRouter(prefix="/audit", tags=["audit"])
 
 
-@router.get("", response_model=list[AuditLogResponse])
+@router.get("", response_model=list[AuditLogResponse], summary="List Audit Logs")
 async def list_audit_logs(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -26,6 +28,7 @@ async def list_audit_logs(
     limit: int = Query(50, le=200),
     offset: int = Query(0, ge=0),
 ):
+    """List audit logs for the current user's organization."""
     query = (
         select(AuditLog)
         .where(AuditLog.org_id == current_user.org_id)
@@ -44,13 +47,14 @@ async def list_audit_logs(
     return result.scalars().all()
 
 
-@router.get("/export")
+@router.get("/export", summary="Export Audit Logs as CSV")
 async def export_audit_logs(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     start_date: datetime | None = Query(None),
     end_date: datetime | None = Query(None),
 ):
+    """Export audit logs as a CSV file download."""
     query = (
         select(AuditLog)
         .where(AuditLog.org_id == current_user.org_id)
@@ -87,11 +91,12 @@ async def export_audit_logs(
     )
 
 
-@router.get("/analytics/summary")
+@router.get("/analytics/summary", summary="Get Analytics Summary")
 async def get_analytics_summary(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Get engagement action counts grouped by type and status."""
     # Count engagement actions by type and status for the user's org
     result = await db.execute(
         select(
@@ -111,3 +116,36 @@ async def get_analytics_summary(
         summary[key][action_status.value] = count
 
     return summary
+
+
+@router.get("/recent-activity", response_model=list[ActivityFeedItem], summary="Get Recent Activity Feed")
+async def get_recent_activity(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(20, le=50),
+):
+    """Get recent activity feed for the dashboard."""
+    # Recent engagement actions with post and user info
+    actions_result = await db.execute(
+        select(EngagementAction, User.full_name, Post.url, TrackedPage.name)
+        .join(User, EngagementAction.user_id == User.id)
+        .join(Post, EngagementAction.post_id == Post.id)
+        .join(TrackedPage, Post.tracked_page_id == TrackedPage.id)
+        .where(User.org_id == current_user.org_id)
+        .order_by(EngagementAction.created_at.desc())
+        .limit(limit)
+    )
+
+    items = []
+    for action, user_name, post_url, page_name in actions_result.all():
+        items.append(ActivityFeedItem(
+            type=f"{action.action_type.value}_{action.status.value}",
+            user_name=user_name,
+            post_url=post_url,
+            page_name=page_name,
+            timestamp=action.completed_at or action.created_at,
+            comment_text=action.comment_text if action.action_type.value == "comment" else None,
+            error=action.error_message if action.status.value == "failed" else None,
+        ))
+
+    return items

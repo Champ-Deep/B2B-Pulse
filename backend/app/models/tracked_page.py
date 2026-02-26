@@ -41,6 +41,8 @@ class TrackedPage(Base):
         default=PageType.PERSONAL,
     )
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_polled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_poll_status: Mapped[str | None] = mapped_column(String(50), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships

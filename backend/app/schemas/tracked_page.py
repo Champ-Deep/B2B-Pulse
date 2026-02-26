@@ -24,6 +24,8 @@ class TrackedPageResponse(BaseModel):
     name: str
     page_type: str
     active: bool
+    last_polled_at: datetime | None = None
+    last_poll_status: str | None = None
 
     model_config = {"from_attributes": True}
 

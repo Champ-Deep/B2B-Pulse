@@ -42,11 +42,12 @@ def schedule_staggered_engagements(post_id: str, tracked_page_id: str):
 async def _schedule_engagements(post_id: str, tracked_page_id: str):
     import uuid
 
-    from sqlalchemy import select
+    from sqlalchemy import func, select
 
     from app.database import get_task_session
     from app.models.engagement import ActionStatus, ActionType, EngagementAction
     from app.models.tracked_page import TrackedPageSubscription
+    from app.models.user import UserProfile
 
     async with get_task_session() as db:
         # Get all subscriptions for this page
@@ -57,9 +58,53 @@ async def _schedule_engagements(post_id: str, tracked_page_id: str):
         )
         subscriptions = result.scalars().all()
 
+        now = datetime.now(UTC)
+        is_weekend = now.weekday() >= 5  # Saturday=5, Sunday=6
+
         for i, sub in enumerate(subscriptions):
-            # Create like action
-            if sub.auto_like:
+            # Load user's automation settings for risk profile and quiet hours
+            profile_result = await db.execute(
+                select(UserProfile).where(UserProfile.user_id == sub.user_id)
+            )
+            profile = profile_result.scalar_one_or_none()
+            auto_settings = (profile.automation_settings if profile else None) or {}
+            risk = auto_settings.get("risk_profile", "safe")
+
+            # --- Quiet hours offset ---
+            quiet_offset = 0
+            if auto_settings.get("quiet_hours_enabled", True):
+                quiet_offset = _quiet_hours_offset(
+                    now,
+                    auto_settings.get("quiet_hours_start", "22:00"),
+                    auto_settings.get("quiet_hours_end", "07:00"),
+                )
+
+            # --- Daily cap check ---
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            today_likes = (
+                await db.execute(
+                    select(func.count(EngagementAction.id)).where(
+                        EngagementAction.user_id == sub.user_id,
+                        EngagementAction.action_type == ActionType.LIKE,
+                        EngagementAction.created_at >= today_start,
+                    )
+                )
+            ).scalar() or 0
+            today_comments = (
+                await db.execute(
+                    select(func.count(EngagementAction.id)).where(
+                        EngagementAction.user_id == sub.user_id,
+                        EngagementAction.action_type == ActionType.COMMENT,
+                        EngagementAction.created_at >= today_start,
+                    )
+                )
+            ).scalar() or 0
+
+            like_cap = 150 if risk == "aggro" else 50
+            comment_cap = 60 if risk == "aggro" else 20
+
+            # --- Create like action ---
+            if sub.auto_like and today_likes < like_cap:
                 like_action = EngagementAction(
                     post_id=uuid.UUID(post_id),
                     user_id=sub.user_id,
@@ -69,17 +114,23 @@ async def _schedule_engagements(post_id: str, tracked_page_id: str):
                 db.add(like_action)
                 await db.flush()
 
-                # Enqueue like with small random delay between users
-                from app.config import LIKE_STAGGER_MAX, LIKE_STAGGER_MIN
+                if risk == "aggro":
+                    delay = random.randint(1, 2) * (i + 1)
+                else:
+                    from app.config import LIKE_STAGGER_MAX, LIKE_STAGGER_MIN
 
-                delay_seconds = random.randint(LIKE_STAGGER_MIN, LIKE_STAGGER_MAX) * (i + 1)
+                    delay = random.randint(LIKE_STAGGER_MIN, LIKE_STAGGER_MAX) * (i + 1)
+                    if is_weekend:
+                        delay *= 2  # Weekend dampening
+
+                delay += quiet_offset
                 execute_engagement.apply_async(
                     args=[str(like_action.id)],
-                    countdown=delay_seconds,
+                    countdown=delay,
                 )
 
-            # Create comment action
-            if sub.auto_comment:
+            # --- Create comment action ---
+            if sub.auto_comment and today_comments < comment_cap:
                 comment_action = EngagementAction(
                     post_id=uuid.UUID(post_id),
                     user_id=sub.user_id,
@@ -89,23 +140,60 @@ async def _schedule_engagements(post_id: str, tracked_page_id: str):
                 db.add(comment_action)
                 await db.flush()
 
-                # Stagger comments with random intervals per user
-                from app.config import (
-                    COMMENT_INTER_USER_DELAY,
-                    COMMENT_STAGGER_MAX,
-                    COMMENT_STAGGER_MIN,
-                )
+                if risk == "aggro":
+                    delay = random.randint(15, 60) + (i * 15)
+                else:
+                    from app.config import (
+                        COMMENT_INTER_USER_DELAY,
+                        COMMENT_STAGGER_MAX,
+                        COMMENT_STAGGER_MIN,
+                    )
 
-                delay_seconds = random.randint(COMMENT_STAGGER_MIN, COMMENT_STAGGER_MAX) + (
-                    i * COMMENT_INTER_USER_DELAY
-                )
+                    delay = random.randint(COMMENT_STAGGER_MIN, COMMENT_STAGGER_MAX) + (
+                        i * COMMENT_INTER_USER_DELAY
+                    )
+                    if is_weekend:
+                        delay *= 2  # Weekend dampening
+
+                delay += quiet_offset
                 execute_engagement.apply_async(
                     args=[str(comment_action.id)],
-                    countdown=delay_seconds,
+                    countdown=delay,
                 )
 
         await db.commit()
         logger.info(f"Scheduled {len(subscriptions)} engagement sets for post {post_id}")
+
+
+def _quiet_hours_offset(now: datetime, start_str: str, end_str: str) -> int:
+    """Calculate seconds until quiet hours end, or 0 if not in quiet hours."""
+    try:
+        sh, sm = int(start_str[:2]), int(start_str[3:5])
+        eh, em = int(end_str[:2]), int(end_str[3:5])
+    except (ValueError, IndexError):
+        return 0
+
+    current_minutes = now.hour * 60 + now.minute
+    start_minutes = sh * 60 + sm
+    end_minutes = eh * 60 + em
+
+    in_quiet = False
+    if start_minutes > end_minutes:
+        # Wraps midnight (e.g. 22:00 - 07:00)
+        in_quiet = current_minutes >= start_minutes or current_minutes < end_minutes
+    else:
+        # Same day (e.g. 01:00 - 06:00)
+        in_quiet = start_minutes <= current_minutes < end_minutes
+
+    if not in_quiet:
+        return 0
+
+    # Calculate seconds until end of quiet hours
+    if current_minutes < end_minutes:
+        return (end_minutes - current_minutes) * 60
+    else:
+        # Past midnight wrap: minutes until midnight + end_minutes
+        return ((24 * 60 - current_minutes) + end_minutes) * 60
 
 
 @celery_app.task(
@@ -118,6 +206,46 @@ async def _schedule_engagements(post_id: str, tracked_page_id: str):
 )
 def execute_engagement(self, engagement_action_id: str):
     """Execute a single engagement action (like or comment)."""
+    # Acquire user lock before executing to prevent concurrent actions
+    from app.core.locks import acquire_user_lock
+    from app.database import get_task_session
+    from sqlalchemy import select
+
+    # Get user_id from engagement action first (need DB access)
+    import uuid
+    from app.models.engagement import EngagementAction
+
+    with get_task_session() as db:
+        result = db.execute(
+            select(EngagementAction.user_id, EngagementAction.post_id).where(
+                EngagementAction.id == uuid.UUID(engagement_action_id)
+            )
+        )
+        action_data = result.one_or_none()
+        if not action_data:
+            logger.error(f"Engagement action {engagement_action_id} not found")
+            return
+        user_id, post_id = action_data
+
+        # Get platform from post
+        from app.models.post import Post
+
+        post_result = db.execute(select(Post.platform).where(Post.id == post_id))
+        platform = post_result.scalar_one_or_none()
+
+    if not platform:
+        logger.error(f"Post for engagement {engagement_action_id} not found")
+        return
+
+    # Determine lock action based on platform
+    lock_action = f"engagement_{platform.value}"
+
+    # Try to acquire lock (non-blocking)
+    lock = acquire_user_lock(str(user_id), lock_action)
+    if not lock:
+        logger.info(f"User {user_id} is busy with {lock_action}, will retry")
+        raise self.retry(countdown=30)  # Retry after 30 seconds
+
     try:
         asyncio.run(_execute_engagement(engagement_action_id))
     except (httpx.TimeoutException, httpx.ConnectError, SoftTimeLimitExceeded) as e:
@@ -126,6 +254,8 @@ def execute_engagement(self, engagement_action_id: str):
     except Exception as e:
         logger.error(f"Engagement execution failed for {engagement_action_id}: {e}")
         raise
+    finally:
+        lock.release()
 
 
 async def _execute_engagement(engagement_action_id: str):
@@ -230,12 +360,27 @@ async def _execute_engagement(engagement_action_id: str):
             elif action.action_type == ActionType.COMMENT:
                 comment_platform = _get_comment_platform(platform_value, post.url)
 
-                from app.services.comment_generator import generate_and_review_comment
+                # Load org-level custom avoid phrases
+                from app.models.engagement import AIAvoidPhrase
+                from app.services.comment_generator import (
+                    DEFAULT_AVOID_PHRASES,
+                    generate_and_review_comment,
+                )
+
+                org_phrases_result = await db.execute(
+                    select(AIAvoidPhrase).where(
+                        AIAvoidPhrase.org_id == user.org_id,
+                        AIAvoidPhrase.active.is_(True),
+                    )
+                )
+                custom_phrases = [p.phrase for p in org_phrases_result.scalars().all()]
+                all_avoid = list(DEFAULT_AVOID_PHRASES) + custom_phrases if custom_phrases else None
 
                 comment_result = await generate_and_review_comment(
                     post_content=post.content_text or "",
                     user_profile=profile.markdown_text if profile else "",
                     tone_settings=profile.tone_settings if profile else None,
+                    avoid_phrases=all_avoid,
                     platform=comment_platform,
                 )
                 action.comment_text = comment_result["comment"]

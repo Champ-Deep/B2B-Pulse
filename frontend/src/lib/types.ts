@@ -5,11 +5,22 @@ export interface User {
   role: string
   org_id: string
   is_active: boolean
+  team_id: string | null
+  is_platform_admin: boolean
+  linkedin_id: string | null
 }
 
 export interface UserProfile {
   markdown_text: string | null
   tone_settings: Record<string, unknown> | null
+}
+
+export interface Team {
+  id: string
+  org_id: string
+  name: string
+  member_count: number
+  created_at: string
 }
 
 export interface TrackedPage {
@@ -65,6 +76,8 @@ export interface OrgInvite {
   expires_at: string
   created_at: string
   invite_url: string
+  team_id: string | null
+  team_name: string | null
 }
 
 export interface OrgMember {
@@ -75,6 +88,8 @@ export interface OrgMember {
   is_active: boolean
   created_at: string
   integrations: string[]
+  team_id: string | null
+  team_name: string | null
 }
 
 export interface SubscribeSettings {
@@ -96,9 +111,26 @@ export interface AnalyticsSummary {
 
 export interface AutomationSettings {
   risk_profile: 'safe' | 'aggro'
+  quiet_hours_enabled: boolean
   quiet_hours_start: string
   quiet_hours_end: string
   polling_interval: number
+}
+
+export interface AvoidPhrase {
+  id: string
+  phrase: string
+  active: boolean
+}
+
+export interface ActivityFeedItem {
+  type: string
+  user_name: string
+  post_url: string | null
+  page_name: string | null
+  timestamp: string
+  comment_text: string | null
+  error: string | null
 }
 
 export interface EngagementBrief {

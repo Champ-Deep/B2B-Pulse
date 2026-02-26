@@ -10,11 +10,12 @@ from app.schemas.user import UserProfileResponse, UserProfileUpdate
 router = APIRouter(prefix="/users", tags=["users"])
 
 
-@router.get("/profile", response_model=UserProfileResponse)
+@router.get("/profile", response_model=UserProfileResponse, summary="Get User Profile")
 async def get_profile(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Get the current user's profile and tone settings."""
     result = await db.execute(select(UserProfile).where(UserProfile.user_id == current_user.id))
     profile = result.scalar_one_or_none()
     if profile is None:
@@ -22,12 +23,13 @@ async def get_profile(
     return profile
 
 
-@router.put("/profile", response_model=UserProfileResponse)
+@router.put("/profile", response_model=UserProfileResponse, summary="Update User Profile")
 async def update_profile(
     request: UserProfileUpdate,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Update the current user's profile text and/or tone settings."""
     result = await db.execute(select(UserProfile).where(UserProfile.user_id == current_user.id))
     profile = result.scalar_one_or_none()
 

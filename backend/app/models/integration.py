@@ -30,7 +30,18 @@ class IntegrationAccount(Base):
     token_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    session_cookies: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    session_cookies: Mapped[dict | list | str | None] = mapped_column(JSONB, nullable=True)
+
+    # LinkedIn-specific fields (dedicated columns for better queryability)
+    linkedin_user_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    linkedin_user_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    session_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_session_check: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     settings: Mapped[dict | None] = mapped_column(JSONB, nullable=True, default=dict)
     is_active: Mapped[bool] = mapped_column(default=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

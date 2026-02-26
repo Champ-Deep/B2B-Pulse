@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     )
 
     # App
-    app_name: str = "AutoEngage"
+    app_name: str = "B2B Pulse"
     app_env: str = "development"
     cors_origins: str = "http://localhost:5173"
 
@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     linkedin_client_id: str = ""
     linkedin_client_secret: str = ""
     linkedin_redirect_uri: str = "http://localhost:8000/api/integrations/linkedin/callback"
+    linkedin_auth_redirect_uri: str = "http://localhost:8000/api/auth/linkedin/callback"
 
     # OpenRouter
     openrouter_api_key: str = ""

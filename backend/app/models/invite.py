@@ -38,8 +38,12 @@ class OrgInvite(Base):
     accepted_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
     )
+    team_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("teams.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
     org: Mapped["Org"] = relationship()  # noqa: F821
     inviter: Mapped["User"] = relationship(foreign_keys=[invited_by])  # noqa: F821
+    team: Mapped["Team | None"] = relationship()  # noqa: F821

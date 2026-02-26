@@ -9,6 +9,7 @@ celery_app = Celery(
     include=[
         "app.workers.polling_tasks",
         "app.workers.engagement_tasks",
+        "app.workers.session_monitor",
     ],
 )
 
@@ -25,6 +26,10 @@ celery_app.conf.update(
         "poll-tracked-pages": {
             "task": "app.workers.polling_tasks.dispatch_poll_tasks",
             "schedule": 300.0,  # Every 5 minutes
+        },
+        "check-linkedin-sessions": {
+            "task": "app.workers.session_monitor.check_linkedin_sessions",
+            "schedule": 21600.0,  # Every 6 hours
         },
     },
 )

@@ -2,9 +2,9 @@ import { useEffect, useState } from 'react'
 import api from '../api/client'
 import { StatusBadge } from '../components/Badge'
 import { SectionLoading } from '../components/Loading'
-import type { AutomationSettings, IntegrationStatus } from '../lib/types'
+import type { AutomationSettings, AvoidPhrase, IntegrationStatus } from '../lib/types'
 
-export default function AutomationSettings() {
+export default function SettingsPage() {
   const [integrations, setIntegrations] = useState<IntegrationStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [connectingLinkedIn, setConnectingLinkedIn] = useState(false)
@@ -13,6 +13,7 @@ export default function AutomationSettings() {
   // Automation settings state
   const [settings, setSettings] = useState<AutomationSettings>({
     risk_profile: 'safe',
+    quiet_hours_enabled: true,
     quiet_hours_start: '22:00',
     quiet_hours_end: '07:00',
     polling_interval: 300,
@@ -24,20 +25,37 @@ export default function AutomationSettings() {
   const [liAtCookie, setLiAtCookie] = useState('')
   const [savingSession, setSavingSession] = useState(false)
   const [sessionMessage, setSessionMessage] = useState('')
+  const [showCookieGuide, setShowCookieGuide] = useState(false)
+
+  // LinkedIn in-app login state
+  const [showLoginForm, setShowLoginForm] = useState(false)
+  const [loginEmail, setLoginEmail] = useState('')
+  const [loginPassword, setLoginPassword] = useState('')
+  const [loginLoading, setLoginLoading] = useState(false)
+  const [loginMessage, setLoginMessage] = useState('')
+  const [loginSessionId, setLoginSessionId] = useState<string | null>(null)
+  const [verificationCode, setVerificationCode] = useState('')
 
   // WhatsApp QR state
   const [qrCode, setQrCode] = useState<string | null>(null)
   const [whatsappStatus, setWhatsappStatus] = useState<string>('initializing')
 
+  // Avoid phrases state
+  const [avoidPhrases, setAvoidPhrases] = useState<AvoidPhrase[]>([])
+  const [newPhrase, setNewPhrase] = useState('')
+  const [addingPhrase, setAddingPhrase] = useState(false)
+
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [statusRes, settingsRes] = await Promise.all([
+        const [statusRes, settingsRes, phrasesRes] = await Promise.all([
           api.get('/integrations/status'),
           api.get('/automation/settings'),
+          api.get('/automation/avoid-phrases'),
         ])
         setIntegrations(statusRes.data)
         setSettings(settingsRes.data)
+        setAvoidPhrases(phrasesRes.data)
       } catch (err) {
         console.error('Failed to load settings:', err)
       } finally {
@@ -67,7 +85,6 @@ export default function AutomationSettings() {
           setQrCode(data.qr)
         }
       } catch {
-        // Sidecar not available
         setWhatsappStatus('unavailable')
       }
     }
@@ -118,6 +135,66 @@ export default function AutomationSettings() {
     }
   }
 
+  const handleLoginStart = async () => {
+    if (!loginEmail.trim() || !loginPassword.trim()) return
+    setLoginLoading(true)
+    setLoginMessage('')
+    try {
+      const { data } = await api.post('/integrations/linkedin/login-start', {
+        email: loginEmail.trim(),
+        password: loginPassword.trim(),
+      })
+      if (data.status === 'success') {
+        setLoginMessage('Login successful! Session cookies saved.')
+        setIntegrations((prev) =>
+          prev ? { ...prev, linkedin: { ...prev.linkedin, has_session_cookies: true } } : prev,
+        )
+        setShowLoginForm(false)
+        setLoginEmail('')
+        setLoginPassword('')
+      } else if (data.status === 'needs_verification') {
+        setLoginSessionId(data.session_id)
+        setLoginMessage('LinkedIn requires verification. Check your email and enter the code below.')
+      } else if (data.status === 'captcha') {
+        setLoginMessage('LinkedIn is showing a CAPTCHA. Please use the cookie method instead.')
+      } else {
+        setLoginMessage(data.error || 'Login failed. Try the cookie method instead.')
+      }
+    } catch {
+      setLoginMessage('Login failed. Please try the cookie paste method instead.')
+    } finally {
+      setLoginLoading(false)
+    }
+  }
+
+  const handleLoginVerify = async () => {
+    if (!verificationCode.trim() || !loginSessionId) return
+    setLoginLoading(true)
+    try {
+      const { data } = await api.post('/integrations/linkedin/login-verify', {
+        session_id: loginSessionId,
+        code: verificationCode.trim(),
+      })
+      if (data.status === 'success') {
+        setLoginMessage('Verification successful! Session cookies saved.')
+        setIntegrations((prev) =>
+          prev ? { ...prev, linkedin: { ...prev.linkedin, has_session_cookies: true } } : prev,
+        )
+        setShowLoginForm(false)
+        setLoginSessionId(null)
+        setVerificationCode('')
+        setLoginEmail('')
+        setLoginPassword('')
+      } else {
+        setLoginMessage(data.error || 'Verification failed.')
+      }
+    } catch {
+      setLoginMessage('Verification failed.')
+    } finally {
+      setLoginLoading(false)
+    }
+  }
+
   const handleSaveSettings = async () => {
     setSaving(true)
     setSaveMessage('')
@@ -133,6 +210,32 @@ export default function AutomationSettings() {
     }
   }
 
+  const handleAddPhrase = async () => {
+    if (!newPhrase.trim()) return
+    setAddingPhrase(true)
+    try {
+      const { data } = await api.post('/automation/avoid-phrases', { phrase: newPhrase.trim() })
+      setAvoidPhrases((prev) => [data, ...prev])
+      setNewPhrase('')
+    } catch (err: unknown) {
+      const error = err as { response?: { data?: { detail?: string } } }
+      console.error('Failed to add phrase:', error.response?.data?.detail || 'Unknown error')
+    } finally {
+      setAddingPhrase(false)
+    }
+  }
+
+  const handleDeletePhrase = async (id: string) => {
+    try {
+      await api.delete(`/automation/avoid-phrases/${id}`)
+      setAvoidPhrases((prev) => prev.filter((p) => p.id !== id))
+    } catch (err) {
+      console.error('Failed to delete phrase:', err)
+    }
+  }
+
+  const BOOKMARKLET = `javascript:void(document.cookie.split(';').forEach(c=>{if(c.trim().startsWith('li_at=')){prompt('Copy this li_at value:',c.trim().split('=').slice(1).join('='))}}))`;
+
   if (loading) {
     return <SectionLoading />
   }
@@ -141,7 +244,7 @@ export default function AutomationSettings() {
     <div className="space-y-8 max-w-3xl">
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Settings</h1>
-        <p className="text-gray-500 mt-1">Manage integrations and automation preferences</p>
+        <p className="text-gray-500 mt-1">Manage integrations, automation preferences, and writing rules</p>
       </div>
 
       {/* LinkedIn Integration */}
@@ -163,7 +266,7 @@ export default function AutomationSettings() {
           </button>
         )}
         {integrations?.linkedin.connected && (
-          <div className="border-t pt-4 space-y-3">
+          <div className="border-t pt-4 space-y-4">
             <div className="flex items-center gap-2">
               <h3 className="text-sm font-medium text-gray-700">Browser Session</h3>
               {integrations.linkedin.has_session_cookies ? (
@@ -175,30 +278,131 @@ export default function AutomationSettings() {
               )}
             </div>
             <p className="text-xs text-gray-500">
-              Required for post discovery. Open LinkedIn in your browser, press F12, go to Application &rarr; Cookies
-              &rarr; linkedin.com, and copy the value of <code className="bg-gray-100 px-1 py-0.5 rounded">li_at</code>.
+              Required for post discovery and Playwright-based engagement. Cookie typically lasts ~1 year.
             </p>
-            <div className="flex gap-2">
-              <input
-                type="password"
-                value={liAtCookie}
-                onChange={(e) => setLiAtCookie(e.target.value)}
-                placeholder="Paste li_at cookie value"
-                className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
-              />
+
+            {/* Method 1: Cookie paste with guided walkthrough */}
+            <div className="space-y-2">
               <button
-                onClick={handleSaveSession}
-                disabled={savingSession || !liAtCookie.trim()}
-                className="px-4 py-2 bg-[#0077b5] text-white rounded-lg text-sm font-medium hover:bg-[#005885] disabled:opacity-50 transition-colors whitespace-nowrap"
+                onClick={() => setShowCookieGuide(!showCookieGuide)}
+                className="text-sm text-primary-600 hover:text-primary-700 font-medium"
               >
-                {savingSession ? 'Validating...' : 'Save Session'}
+                {showCookieGuide ? 'Hide instructions' : 'Option 1: Paste cookie manually'}
               </button>
+              {showCookieGuide && (
+                <div className="bg-gray-50 rounded-lg p-4 space-y-3">
+                  <p className="text-xs font-medium text-gray-700">Step-by-step:</p>
+                  <ol className="text-xs text-gray-600 space-y-1.5 list-decimal list-inside">
+                    <li>Open <strong>linkedin.com</strong> in Chrome and make sure you are logged in</li>
+                    <li>Press <strong>F12</strong> (or right-click &rarr; Inspect) to open Developer Tools</li>
+                    <li>Click the <strong>Application</strong> tab at the top of DevTools</li>
+                    <li>In the left sidebar, expand <strong>Cookies</strong> &rarr; click <strong>linkedin.com</strong></li>
+                    <li>Find <code className="bg-white px-1 py-0.5 rounded border text-xs">li_at</code> in the list and double-click the <strong>Value</strong> column</li>
+                    <li>Copy the value (Ctrl+C / Cmd+C) and paste it below</li>
+                  </ol>
+                  <p className="text-xs text-gray-500">
+                    Or use this bookmarklet: drag{' '}
+                    <a
+                      href={BOOKMARKLET}
+                      onClick={(e) => e.preventDefault()}
+                      className="px-2 py-0.5 bg-primary-100 text-primary-700 rounded text-xs font-medium cursor-grab"
+                      title="Drag this to your bookmarks bar, then click it while on linkedin.com"
+                    >
+                      Extract li_at
+                    </a>{' '}
+                    to your bookmarks bar, then click it while on LinkedIn.
+                  </p>
+                  <div className="flex gap-2">
+                    <input
+                      type="password"
+                      value={liAtCookie}
+                      onChange={(e) => setLiAtCookie(e.target.value)}
+                      placeholder="Paste li_at cookie value"
+                      className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+                    />
+                    <button
+                      onClick={handleSaveSession}
+                      disabled={savingSession || !liAtCookie.trim()}
+                      className="px-4 py-2 bg-[#0077b5] text-white rounded-lg text-sm font-medium hover:bg-[#005885] disabled:opacity-50 transition-colors whitespace-nowrap"
+                    >
+                      {savingSession ? 'Validating...' : 'Save Session'}
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
-            {sessionMessage && (
-              <p
-                className={`text-xs ${sessionMessage.startsWith('Session saved') ? 'text-green-600' : 'text-red-600'}`}
+
+            {/* Method 2: In-app login */}
+            <div className="space-y-2">
+              <button
+                onClick={() => setShowLoginForm(!showLoginForm)}
+                className="text-sm text-primary-600 hover:text-primary-700 font-medium"
               >
-                {sessionMessage}
+                {showLoginForm ? 'Hide login form' : 'Option 2: Login with LinkedIn credentials'}
+              </button>
+              {showLoginForm && (
+                <div className="bg-gray-50 rounded-lg p-4 space-y-3">
+                  <p className="text-xs text-gray-500">
+                    Enter your LinkedIn email and password. Your credentials are <strong>not stored</strong> — we only
+                    save the resulting session cookie.
+                  </p>
+                  {!loginSessionId ? (
+                    <div className="space-y-2">
+                      <input
+                        type="email"
+                        value={loginEmail}
+                        onChange={(e) => setLoginEmail(e.target.value)}
+                        placeholder="LinkedIn email"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+                      />
+                      <input
+                        type="password"
+                        value={loginPassword}
+                        onChange={(e) => setLoginPassword(e.target.value)}
+                        placeholder="LinkedIn password"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+                      />
+                      <button
+                        onClick={handleLoginStart}
+                        disabled={loginLoading || !loginEmail.trim() || !loginPassword.trim()}
+                        className="px-4 py-2 bg-[#0077b5] text-white rounded-lg text-sm font-medium hover:bg-[#005885] disabled:opacity-50 transition-colors"
+                      >
+                        {loginLoading ? 'Logging in...' : 'Login'}
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <p className="text-xs text-amber-600 font-medium">Verification required</p>
+                      <input
+                        type="text"
+                        value={verificationCode}
+                        onChange={(e) => setVerificationCode(e.target.value)}
+                        placeholder="Enter verification code"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+                      />
+                      <button
+                        onClick={handleLoginVerify}
+                        disabled={loginLoading || !verificationCode.trim()}
+                        className="px-4 py-2 bg-[#0077b5] text-white rounded-lg text-sm font-medium hover:bg-[#005885] disabled:opacity-50 transition-colors"
+                      >
+                        {loginLoading ? 'Verifying...' : 'Submit Code'}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Session messages */}
+            {(sessionMessage || loginMessage) && (
+              <p
+                className={`text-xs ${
+                  (sessionMessage || loginMessage).includes('saved') || (sessionMessage || loginMessage).includes('successful')
+                    ? 'text-green-600'
+                    : 'text-red-600'
+                }`}
+              >
+                {sessionMessage || loginMessage}
               </p>
             )}
           </div>
@@ -272,7 +476,7 @@ export default function AutomationSettings() {
                 />
                 <div>
                   <p className="text-sm font-medium">Safe Mode</p>
-                  <p className="text-xs text-gray-500">Random delays 1-7s, lower daily limits</p>
+                  <p className="text-xs text-gray-500">Longer delays, daily caps (50 likes, 20 comments), weekend dampening</p>
                 </div>
               </label>
               <label className="flex items-center gap-2 px-4 py-3 border rounded-lg cursor-pointer hover:bg-gray-50">
@@ -286,7 +490,7 @@ export default function AutomationSettings() {
                 />
                 <div>
                   <p className="text-sm font-medium">Aggro Mode</p>
-                  <p className="text-xs text-gray-500">Minimal delays, higher limits (internal pages)</p>
+                  <p className="text-xs text-gray-500">Minimal delays, higher caps (150 likes, 60 comments), no weekend dampening</p>
                 </div>
               </label>
             </div>
@@ -306,8 +510,19 @@ export default function AutomationSettings() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Quiet Hours</label>
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 mb-2">
+              <label className="block text-sm font-medium text-gray-700">Quiet Hours</label>
+              <label className="flex items-center gap-1.5 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={settings.quiet_hours_enabled}
+                  onChange={(e) => setSettings({ ...settings, quiet_hours_enabled: e.target.checked })}
+                  className="rounded text-primary-600 focus:ring-primary-500"
+                />
+                <span className="text-xs text-gray-500">Enabled</span>
+              </label>
+            </div>
+            <div className={`flex items-center gap-3 ${!settings.quiet_hours_enabled ? 'opacity-40 pointer-events-none' : ''}`}>
               <input
                 type="time"
                 value={settings.quiet_hours_start}
@@ -322,7 +537,11 @@ export default function AutomationSettings() {
                 className="px-3 py-2 border border-gray-300 rounded-lg shadow-sm"
               />
             </div>
-            <p className="text-xs text-gray-500 mt-1">Actions will be queued during quiet hours and executed after</p>
+            <p className="text-xs text-gray-500 mt-1">
+              {settings.quiet_hours_enabled
+                ? 'Engagements will be deferred until quiet hours end'
+                : 'Quiet hours disabled. Engagements will run 24/7'}
+            </p>
           </div>
         </div>
 
@@ -340,6 +559,59 @@ export default function AutomationSettings() {
             </span>
           )}
         </div>
+      </section>
+
+      {/* Writing Rules (Avoid Phrases) */}
+      <section className="bg-white rounded-xl shadow-sm p-6 space-y-4">
+        <div>
+          <h2 className="text-lg font-semibold">Writing Rules</h2>
+          <p className="text-sm text-gray-500 mt-1">
+            Custom phrases and patterns the AI should never use in generated comments.
+            Em dashes and common generic phrases are blocked by default.
+          </p>
+        </div>
+
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={newPhrase}
+            onChange={(e) => setNewPhrase(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleAddPhrase()}
+            placeholder='e.g. "game changer", "no emojis", "always ask a question"'
+            className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+          />
+          <button
+            onClick={handleAddPhrase}
+            disabled={addingPhrase || !newPhrase.trim()}
+            className="px-4 py-2 bg-primary-600 text-white rounded-lg text-sm font-medium hover:bg-primary-700 disabled:opacity-50 transition-colors whitespace-nowrap"
+          >
+            {addingPhrase ? 'Adding...' : 'Add Rule'}
+          </button>
+        </div>
+
+        {avoidPhrases.length > 0 && (
+          <div className="flex flex-wrap gap-2">
+            {avoidPhrases.map((phrase) => (
+              <span
+                key={phrase.id}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-50 text-red-700 rounded-lg text-sm"
+              >
+                {phrase.phrase}
+                <button
+                  onClick={() => handleDeletePhrase(phrase.id)}
+                  className="text-red-400 hover:text-red-600 font-bold"
+                  title="Remove"
+                >
+                  &times;
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        <p className="text-xs text-gray-400">
+          Built-in rules: no em/en dashes, no &quot;thanks for sharing&quot;, no &quot;great insights&quot;, no &quot;couldn&apos;t agree more&quot;, and 15+ other generic AI phrases.
+        </p>
       </section>
     </div>
   )

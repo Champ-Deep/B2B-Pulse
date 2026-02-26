@@ -27,6 +27,8 @@ DEFAULT_AVOID_PHRASES = [
     "totally agree",
     "this is a must-read",
     "absolutely brilliant",
+    "—",
+    "–",
 ]
 
 PLATFORM_TONE = {
@@ -56,12 +58,15 @@ GENERATION_SYSTEM_PROMPT = """{platform_intro}
 
 RULES:
 1. Write 1-3 short comment variants (1-3 sentences each, prefer one-liners)
-2. Sound conversational and human — like texting a colleague, not writing an essay
+2. Sound conversational and human, like texting a colleague, not writing an essay
 3. Reference specific details from the post content
 4. Add value: share a quick opinion, ask a question, or relate it to experience
 5. NEVER use these AI-tell phrases: {avoid_phrases}
 6. NEVER be generic. Every comment must reference something specific from the post.
 7. Match the user's tone and style profile below.
+8. NEVER use em dashes or en dashes. Use commas, periods, or semicolons instead.
+
+{custom_rules}
 
 USER PROFILE:
 {user_profile}
@@ -98,8 +103,8 @@ async def _call_openrouter(model: str, messages: list[dict]) -> dict:
             headers={
                 "Authorization": f"Bearer {settings.openrouter_api_key}",
                 "Content-Type": "application/json",
-                "HTTP-Referer": "https://autoengage.app",
-                "X-Title": "AutoEngage",
+                "HTTP-Referer": "https://b2bpulse.app",
+                "X-Title": "B2B Pulse",
             },
         )
         response.raise_for_status()
@@ -120,6 +125,20 @@ async def generate_comments(
     if tone_settings:
         tone_instructions = f"TONE PREFERENCES: {tone_settings}"
 
+    # Extract custom rules from tone_settings
+    custom_rules_text = ""
+    if tone_settings and tone_settings.get("custom_rules"):
+        rules = tone_settings["custom_rules"]
+        if isinstance(rules, list) and rules:
+            numbered = [f"- {r}" for r in rules]
+            custom_rules_text = "CUSTOM WRITING RULES:\n" + "\n".join(numbered)
+
+    # Extract example comments for few-shot learning
+    if tone_settings and tone_settings.get("example_comments"):
+        examples = tone_settings["example_comments"]
+        if examples.strip():
+            custom_rules_text += f"\n\nEXAMPLE COMMENTS (match this style):\n{examples}"
+
     platform_key = platform.lower()
     # Map 'meta' to specific sub-platform or default to facebook
     if platform_key == "meta":
@@ -129,8 +148,9 @@ async def generate_comments(
     system_prompt = GENERATION_SYSTEM_PROMPT.format(
         platform_intro=platform_intro,
         avoid_phrases=", ".join(f'"{p}"' for p in phrases),
-        user_profile=user_profile or "No profile provided — use a friendly professional tone.",
+        user_profile=user_profile or "No profile provided. Use a friendly professional tone.",
         tone_instructions=tone_instructions,
+        custom_rules=custom_rules_text,
     )
 
     platform_label = {"linkedin": "LinkedIn", "instagram": "Instagram", "facebook": "Facebook"}.get(

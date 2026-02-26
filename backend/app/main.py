@@ -36,9 +36,10 @@ def create_app() -> FastAPI:
 
     app = FastAPI(
         title=settings.app_name,
-        version="0.1.0",
-        docs_url=None if settings.is_production else "/docs",
-        redoc_url=None if settings.is_production else "/redoc",
+        description="B2B Social Engagement Automation Platform — automate LinkedIn likes, comments, and team coordination.",
+        version="1.0.0",
+        docs_url="/docs",
+        redoc_url="/redoc",
     )
 
     app.add_middleware(
@@ -72,7 +73,7 @@ def create_app() -> FastAPI:
     async def health_check():
         return {"status": "healthy", "app": settings.app_name, "version": "0.1.0"}
 
-    logger.info(f"AutoEngage started (env={settings.app_env})")
+    logger.info(f"B2B Pulse started (env={settings.app_env})")
     return app
 
 

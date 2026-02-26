@@ -43,3 +43,13 @@ class CommentGenerateResponse(BaseModel):
     model_used: str
     review_passed: bool
     review_notes: str | None = None
+
+
+class ActivityFeedItem(BaseModel):
+    type: str  # like_completed, comment_completed, comment_failed, post_discovered, etc.
+    user_name: str
+    post_url: str | None = None
+    page_name: str | None = None
+    timestamp: datetime
+    comment_text: str | None = None
+    error: str | None = None
