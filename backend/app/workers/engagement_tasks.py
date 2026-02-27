@@ -502,9 +502,10 @@ async def _execute_like(
                     success = await react_to_post(access_token, person_urn, activity_urn)
                     if success:
                         return True
-                    # REST API failed - could be transient (429/500) or permanent
-                    # Re-raise so it gets caught and retried
-                    raise Exception(f"LinkedIn API like failed for {post.url}")
+                    # REST API returned False (not an exception) - means it failed but we should try Playwright
+                    logger.warning(
+                        f"LinkedIn API like failed for {post.url} — falling back to Playwright"
+                    )
                 else:
                     logger.warning(
                         f"Could not extract activity URN from {post.url} — trying Playwright"
@@ -565,8 +566,10 @@ async def _execute_comment(
                     )
                     if success:
                         return True
-                    # REST API failed - could be transient or permanent
-                    raise Exception(f"LinkedIn API comment failed for {post.url}")
+                    # REST API returned False - try Playwright fallback
+                    logger.warning(
+                        f"LinkedIn API comment failed for {post.url} — falling back to Playwright"
+                    )
                 else:
                     logger.warning(
                         f"Could not extract activity URN from {post.url} — trying Playwright"
