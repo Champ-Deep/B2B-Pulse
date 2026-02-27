@@ -62,6 +62,19 @@ async def _schedule_engagements(post_id: str, tracked_page_id: str):
         is_weekend = now.weekday() >= 5  # Saturday=5, Sunday=6
 
         for i, sub in enumerate(subscriptions):
+            # Skip if user already has any engagement action for this post
+            existing = await db.execute(
+                select(EngagementAction).where(
+                    EngagementAction.post_id == uuid.UUID(post_id),
+                    EngagementAction.user_id == sub.user_id,
+                )
+            )
+            if existing.scalar_one_or_none():
+                logger.debug(
+                    f"Skipping - engagement already exists for user {sub.user_id} on post {post_id}"
+                )
+                continue
+
             # Load user's automation settings for risk profile and quiet hours
             profile_result = await db.execute(
                 select(UserProfile).where(UserProfile.user_id == sub.user_id)
