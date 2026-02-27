@@ -11,6 +11,7 @@ Relevant LinkedIn API docs:
 
 import logging
 import re
+import urllib.parse
 
 import httpx
 
@@ -224,3 +225,111 @@ def _parse_shares(elements: list) -> list[dict]:
                 "content": content[:2000],
             })
     return results
+
+
+# ---------------------------------------------------------------------------
+# Engagement helpers (used by engagement_tasks.py)
+# ---------------------------------------------------------------------------
+
+
+def extract_activity_urn_from_url(url: str) -> str | None:
+    """Extract a LinkedIn activity URN from a post URL.
+
+    Supports URLs like:
+      - https://www.linkedin.com/feed/update/urn:li:activity:1234567890/
+      - https://www.linkedin.com/posts/...-activity-1234567890-xxxx?...
+    Returns e.g. 'urn:li:activity:1234567890' or None.
+    """
+    # Direct URN in URL path
+    m = re.search(r"urn:li:activity:(\d+)", url)
+    if m:
+        return f"urn:li:activity:{m.group(1)}"
+
+    # Slug-style URL: ...-activity-1234567890-XXXX
+    m = re.search(r"-activity-(\d+)", url)
+    if m:
+        return f"urn:li:activity:{m.group(1)}"
+
+    return None
+
+
+async def react_to_post(
+    access_token: str, person_urn: str, activity_urn: str, reaction_type: str = "LIKE"
+) -> bool:
+    """Like (react to) a LinkedIn post via the REST API.
+
+    Uses the /v2/socialActions/{activityUrn}/likes endpoint.
+    """
+    encoded_urn = urllib.parse.quote(activity_urn, safe="")
+    url = f"{LINKEDIN_API_BASE}/socialActions/{encoded_urn}/likes"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "X-Restli-Protocol-Version": "2.0.0",
+        "Content-Type": "application/json",
+    }
+    body = {
+        "actor": person_urn,
+        "object": activity_urn,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+            resp = await client.post(url, json=body, headers=headers)
+
+        if resp.status_code in (200, 201):
+            logger.info(f"Reacted to {activity_urn} as {person_urn}")
+            return True
+        elif resp.status_code == 409:
+            # Already liked
+            logger.info(f"Already reacted to {activity_urn}")
+            return True
+        else:
+            logger.warning(
+                f"LinkedIn react failed for {activity_urn}: "
+                f"HTTP {resp.status_code} — {resp.text[:300]}"
+            )
+            return False
+    except Exception as e:
+        logger.error(f"LinkedIn react error for {activity_urn}: {e}")
+        return False
+
+
+async def comment_on_post(
+    access_token: str, person_urn: str, activity_urn: str, comment_text: str
+) -> bool:
+    """Post a comment on a LinkedIn post via the REST API.
+
+    Uses the /v2/socialActions/{activityUrn}/comments endpoint.
+    """
+    encoded_urn = urllib.parse.quote(activity_urn, safe="")
+    url = f"{LINKEDIN_API_BASE}/socialActions/{encoded_urn}/comments"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "X-Restli-Protocol-Version": "2.0.0",
+        "Content-Type": "application/json",
+    }
+    body = {
+        "actor": person_urn,
+        "object": activity_urn,
+        "message": {
+            "text": comment_text,
+        },
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+            resp = await client.post(url, json=body, headers=headers)
+
+        if resp.status_code in (200, 201):
+            logger.info(f"Commented on {activity_urn} as {person_urn}")
+            return True
+        else:
+            logger.warning(
+                f"LinkedIn comment failed for {activity_urn}: "
+                f"HTTP {resp.status_code} — {resp.text[:300]}"
+            )
+            return False
+    except Exception as e:
+        logger.error(f"LinkedIn comment error for {activity_urn}: {e}")
+        return False
+

@@ -249,9 +249,39 @@ async def _poll_single_page(db, page) -> dict:
         new_count += 1
         logger.info(f"New post detected: {post.url}")
 
-        from app.workers.engagement_tasks import schedule_staggered_engagements
+        # Check which users have subscriptions for this page
+        from sqlalchemy import select
+        from app.models.tracked_page import TrackedPageSubscription
 
-        schedule_staggered_engagements.delay(str(post.id), str(page.id))
+        subscriptions_result = await db.execute(
+            select(TrackedPageSubscription).where(
+                TrackedPageSubscription.tracked_page_id == page.id
+            )
+        )
+        subscriptions = subscriptions_result.scalars().all()
+
+        # Skip scheduling if EngagementAction already exists for any subscription
+        # This prevents duplicate engagements when same post is re-discovered
+        from app.models.engagement import EngagementAction, ActionType
+
+        for sub in subscriptions:
+            # Check if user already has an engagement action for this post (any status)
+            existing_action = await db.execute(
+                select(EngagementAction).where(
+                    EngagementAction.post_id == post.id,
+                    EngagementAction.user_id == sub.user_id,
+                )
+            )
+            if existing_action.scalar_one_or_none():
+                logger.debug(
+                    f"Skipping engagement - already exists for user {sub.user_id} on post {post.id}"
+                )
+                continue
+
+            # Schedule engagement for this user
+            from app.workers.engagement_tasks import schedule_staggered_engagements
+
+            schedule_staggered_engagements.delay(str(post.id), str(page.id))
 
     return {"status": "ok", "posts_found": len(posts_data), "new_posts": new_count, "error": None}
 

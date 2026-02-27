@@ -360,14 +360,21 @@ async def _execute_engagement(engagement_action_id: str):
         # Execute the action
         try:
             if action.action_type == ActionType.LIKE:
-                await _execute_like(
+                success = await _execute_like(
                     platform_value,
                     str(action.user_id),
                     post,
                     integration=integration,
                     access_token=access_token,
                 )
-                action.status = ActionStatus.COMPLETED
+                if success:
+                    action.status = ActionStatus.COMPLETED
+                else:
+                    # Permanent failure (button not found, already liked) - don't retry
+                    action.status = ActionStatus.FAILED
+                    action.error_message = (
+                        "Like action could not be completed - button not found or already liked"
+                    )
 
             elif action.action_type == ActionType.COMMENT:
                 comment_platform = _get_comment_platform(platform_value, post.url)
@@ -398,7 +405,7 @@ async def _execute_engagement(engagement_action_id: str):
                 action.comment_text = comment_result["comment"]
                 action.llm_response = comment_result["llm_data"]
 
-                await _execute_comment(
+                success = await _execute_comment(
                     platform_value,
                     str(action.user_id),
                     post,
@@ -406,14 +413,26 @@ async def _execute_engagement(engagement_action_id: str):
                     integration=integration,
                     access_token=access_token,
                 )
-                action.status = ActionStatus.COMPLETED
+                if success:
+                    action.status = ActionStatus.COMPLETED
+                else:
+                    # Permanent failure (comment box not found) - don't retry
+                    action.status = ActionStatus.FAILED
+                    action.error_message = (
+                        "Comment action could not be completed - comment box not found"
+                    )
 
             action.completed_at = datetime.now(UTC)
 
         except Exception as e:
+            # Transient failure (network, rate limit, 500 error) - will be retried
             action.status = ActionStatus.FAILED
             action.error_message = str(e)
-            logger.error(f"Action {engagement_action_id} failed: {e}")
+            action.retry_count += 1
+            action.last_retry_at = datetime.now(UTC)
+            logger.warning(
+                f"Action {engagement_action_id} failed (retry {action.retry_count}): {e}"
+            )
 
         # Write audit log
         audit = AuditLog(
@@ -447,11 +466,16 @@ def _get_comment_platform(platform_value: str, post_url: str) -> str:
 
 async def _execute_like(
     platform_value: str, user_id: str, post, integration=None, access_token=None
-) -> None:
+) -> bool:
     """Execute a like action on the appropriate platform.
 
     For LinkedIn: uses REST API if OAuth token + person URN are available, falls back to Playwright.
     For Meta: uses Playwright automation.
+
+    Returns:
+        True if like was successful, False if it failed (e.g., button not found, already liked).
+    Raises:
+        Exception for transient errors (network, rate limits) that should be retried.
     """
     if platform_value == "linkedin":
         # Try REST API first (preferred — uses OAuth token)
@@ -464,8 +488,10 @@ async def _execute_like(
                 if activity_urn:
                     success = await react_to_post(access_token, person_urn, activity_urn)
                     if success:
-                        return
-                    raise ValueError(f"LinkedIn API reaction failed for {post.url}")
+                        return True
+                    # REST API failed - could be transient (429/500) or permanent
+                    # Re-raise so it gets caught and retried
+                    raise Exception(f"LinkedIn API like failed for {post.url}")
                 else:
                     logger.warning(
                         f"Could not extract activity URN from {post.url} — trying Playwright"
@@ -478,7 +504,8 @@ async def _execute_like(
         # Fallback: Playwright (requires browser session cookies)
         from app.automation.linkedin_actions import like_post
 
-        await like_post(user_id, post.url)
+        result = await like_post(user_id, post.url)
+        return result
 
     elif platform_value == "meta":
         from app.services.url_utils import is_instagram_url
@@ -486,22 +513,29 @@ async def _execute_like(
         if is_instagram_url(post.url):
             from app.automation.instagram_actions import like_post as ig_like
 
-            await ig_like(user_id, post.url)
+            result = await ig_like(user_id, post.url)
+            return result
         else:
             from app.automation.facebook_actions import like_post as fb_like
 
-            await fb_like(user_id, post.url)
+            result = await fb_like(user_id, post.url)
+            return result
     else:
         raise ValueError(f"Unsupported platform for like: {platform_value}")
 
 
 async def _execute_comment(
     platform_value: str, user_id: str, post, comment_text: str, integration=None, access_token=None
-) -> None:
+) -> bool:
     """Execute a comment action on the appropriate platform.
 
     For LinkedIn: uses REST API if OAuth token + person URN are available, falls back to Playwright.
     For Meta: uses Playwright automation.
+
+    Returns:
+        True if comment was successful, False if it failed (e.g., comment box not found).
+    Raises:
+        Exception for transient errors (network, rate limits) that should be retried.
     """
     if platform_value == "linkedin":
         # Try REST API first
@@ -517,8 +551,9 @@ async def _execute_comment(
                         access_token, person_urn, activity_urn, comment_text
                     )
                     if success:
-                        return
-                    raise ValueError(f"LinkedIn API comment failed for {post.url}")
+                        return True
+                    # REST API failed - could be transient or permanent
+                    raise Exception(f"LinkedIn API comment failed for {post.url}")
                 else:
                     logger.warning(
                         f"Could not extract activity URN from {post.url} — trying Playwright"
@@ -527,7 +562,8 @@ async def _execute_comment(
         # Fallback: Playwright
         from app.automation.linkedin_actions import comment_on_post
 
-        await comment_on_post(user_id, post.url, comment_text)
+        result = await comment_on_post(user_id, post.url, comment_text)
+        return result
 
     elif platform_value == "meta":
         from app.services.url_utils import is_instagram_url
@@ -535,10 +571,12 @@ async def _execute_comment(
         if is_instagram_url(post.url):
             from app.automation.instagram_actions import comment_on_post as ig_comment
 
-            await ig_comment(user_id, post.url, comment_text)
+            result = await ig_comment(user_id, post.url, comment_text)
+            return result
         else:
             from app.automation.facebook_actions import comment_on_post as fb_comment
 
-            await fb_comment(user_id, post.url, comment_text)
+            result = await fb_comment(user_id, post.url, comment_text)
+            return result
     else:
         raise ValueError(f"Unsupported platform for comment: {platform_value}")
