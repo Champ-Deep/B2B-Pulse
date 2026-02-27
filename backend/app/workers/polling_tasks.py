@@ -100,7 +100,7 @@ async def _dispatch_polls():
 
 @celery_app.task(
     name="app.workers.polling_tasks.poll_single_page_task",
-    soft_time_limit=60,   # Reduced from 120s — API calls are fast, no Playwright
+    soft_time_limit=60,  # Reduced from 120s — API calls are fast, no Playwright
     time_limit=90,
     max_retries=2,
     default_retry_delay=30,
@@ -214,7 +214,12 @@ async def _poll_single_page(db, page) -> dict:
             posts_data = await _poll_meta_playwright(page)
     else:
         logger.warning(f"Unsupported platform for polling: {page.platform}")
-        return {"status": "error", "posts_found": 0, "new_posts": 0, "error": "Unsupported platform"}
+        return {
+            "status": "error",
+            "posts_found": 0,
+            "new_posts": 0,
+            "error": "Unsupported platform",
+        }
 
     from sqlalchemy.exc import IntegrityError
 
@@ -326,11 +331,14 @@ async def _poll_linkedin_api(db, page) -> list[dict]:
 
 async def _get_linkedin_cookies(db, org_id) -> list[dict] | None:
     """Return LinkedIn session cookies for any active org member.
-
+    Handles both encrypted (string) and plain (list/dict) cookie formats.
     Returns cookies in Playwright format: list of {name, value, domain, path}.
     """
+    import json
+
     from sqlalchemy import select
 
+    from app.core.security import decrypt_value
     from app.models.integration import IntegrationAccount, Platform
     from app.models.user import User
 
@@ -349,14 +357,24 @@ async def _get_linkedin_cookies(db, org_id) -> list[dict] | None:
     if not integration or not integration.session_cookies:
         return None
 
-    cookies = integration.session_cookies
+    cookies_data = integration.session_cookies
+
+    # Handle encrypted cookies (stored as string after encryption changes)
+    if isinstance(cookies_data, str):
+        try:
+            decrypted = decrypt_value(cookies_data)
+            cookies_data = json.loads(decrypted)
+        except Exception:
+            logger.warning(f"Failed to decrypt cookies for org {org_id}")
+            return None
+
     # Normalise to Playwright format
-    if isinstance(cookies, list):
-        return cookies
-    elif isinstance(cookies, dict):
+    if isinstance(cookies_data, list):
+        return cookies_data
+    elif isinstance(cookies_data, dict):
         return [
             {"name": k, "value": v, "domain": ".linkedin.com", "path": "/"}
-            for k, v in cookies.items()
+            for k, v in cookies_data.items()
         ]
     return None
 

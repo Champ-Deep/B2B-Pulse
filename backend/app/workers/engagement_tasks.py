@@ -206,39 +206,19 @@ def _quiet_hours_offset(now: datetime, start_str: str, end_str: str) -> int:
 )
 def execute_engagement(self, engagement_action_id: str):
     """Execute a single engagement action (like or comment)."""
-    # Acquire user lock before executing to prevent concurrent actions
     from app.core.locks import acquire_user_lock
-    from app.database import get_task_session
-    from sqlalchemy import select
 
-    # Get user_id from engagement action first (need DB access)
-    import uuid
-    from app.models.engagement import EngagementAction
-
-    with get_task_session() as db:
-        result = db.execute(
-            select(EngagementAction.user_id, EngagementAction.post_id).where(
-                EngagementAction.id == uuid.UUID(engagement_action_id)
-            )
-        )
-        action_data = result.one_or_none()
-        if not action_data:
-            logger.error(f"Engagement action {engagement_action_id} not found")
-            return
-        user_id, post_id = action_data
-
-        # Get platform from post
-        from app.models.post import Post
-
-        post_result = db.execute(select(Post.platform).where(Post.id == post_id))
-        platform = post_result.scalar_one_or_none()
-
-    if not platform:
-        logger.error(f"Post for engagement {engagement_action_id} not found")
+    # Pre-lock lookup: get user_id and platform so we can acquire a per-user lock.
+    # This must use asyncio.run() because get_task_session() is async.
+    lookup = asyncio.run(_lookup_engagement_meta(engagement_action_id))
+    if lookup is None:
+        logger.error(f"Engagement action {engagement_action_id} not found or missing post")
         return
 
+    user_id, platform_value = lookup
+
     # Determine lock action based on platform
-    lock_action = f"engagement_{platform.value}"
+    lock_action = f"engagement_{platform_value}"
 
     # Try to acquire lock (non-blocking)
     lock = acquire_user_lock(str(user_id), lock_action)
@@ -256,6 +236,38 @@ def execute_engagement(self, engagement_action_id: str):
         raise
     finally:
         lock.release()
+
+
+async def _lookup_engagement_meta(engagement_action_id: str):
+    """Async helper to fetch user_id and platform for an engagement action.
+
+    Returns (user_id, platform_value) or None if not found.
+    """
+    import uuid
+
+    from sqlalchemy import select
+
+    from app.database import get_task_session
+    from app.models.engagement import EngagementAction
+    from app.models.post import Post
+
+    async with get_task_session() as db:
+        result = await db.execute(
+            select(EngagementAction.user_id, EngagementAction.post_id).where(
+                EngagementAction.id == uuid.UUID(engagement_action_id)
+            )
+        )
+        action_data = result.one_or_none()
+        if not action_data:
+            return None
+        user_id, post_id = action_data
+
+        post_result = await db.execute(select(Post.platform).where(Post.id == post_id))
+        platform = post_result.scalar_one_or_none()
+        if not platform:
+            return None
+
+        return (user_id, platform.value)
 
 
 async def _execute_engagement(engagement_action_id: str):

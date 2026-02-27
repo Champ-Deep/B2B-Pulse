@@ -78,15 +78,19 @@ async def get_browser() -> Browser:
     global _browser, _playwright
     if _browser is None or not _browser.is_connected():
         _playwright = await async_playwright().start()
-        _browser = await _playwright.chromium.launch(
-            headless=True,
-            args=[
+        proxy_url = get_proxy_url()
+        launch_kwargs: dict = {
+            "headless": True,
+            "args": [
                 "--disable-blink-features=AutomationControlled",
                 "--disable-features=IsolateOrigins,site-per-process",
                 "--no-sandbox",
             ],
-        )
-        logger.info("Browser instance created")
+        }
+        if proxy_url:
+            launch_kwargs["proxy"] = {"server": proxy_url}
+        _browser = await _playwright.chromium.launch(**launch_kwargs)
+        logger.info(f"Browser instance created (proxy={'yes' if proxy_url else 'no'})")
     return _browser
 
 

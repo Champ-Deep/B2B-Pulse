@@ -267,18 +267,25 @@ export default function SettingsPage() {
         )}
         {integrations?.linkedin.connected && (
           <div className="border-t pt-4 space-y-4">
-            <div className="flex items-center gap-2">
-              <h3 className="text-sm font-medium text-gray-700">Browser Session</h3>
-              {integrations.linkedin.has_session_cookies ? (
-                <span className="px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">Active</span>
-              ) : (
-                <span className="px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-700">
-                  Not configured
+            {/* Session status row */}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <h3 className="text-sm font-medium text-gray-700">Browser Session</h3>
+                {integrations.linkedin.has_session_cookies ? (
+                  <span className="px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">Active</span>
+                ) : (
+                  <span className="px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-700">Not configured</span>
+                )}
+              </div>
+              {/* Connected user name */}
+              {integrations.linkedin.user_name && (
+                <span className="text-xs text-gray-500">
+                  Connected as <span className="font-medium text-gray-700">{integrations.linkedin.user_name}</span>
                 </span>
               )}
             </div>
             <p className="text-xs text-gray-500">
-              Required for post discovery and Playwright-based engagement. Cookie typically lasts ~1 year.
+              Required for post discovery and browser-based engagement. Cookie typically lasts ~1 year.
             </p>
 
             {/* Method 1: Cookie paste with guided walkthrough */}
@@ -287,7 +294,7 @@ export default function SettingsPage() {
                 onClick={() => setShowCookieGuide(!showCookieGuide)}
                 className="text-sm text-primary-600 hover:text-primary-700 font-medium"
               >
-                {showCookieGuide ? 'Hide instructions' : 'Option 1: Paste cookie manually'}
+                {showCookieGuide ? 'Hide instructions' : integrations.linkedin.has_session_cookies ? 'Re-connect session' : 'Option 1: Paste cookie manually'}
               </button>
               {showCookieGuide && (
                 <div className="bg-gray-50 rounded-lg p-4 space-y-3">
@@ -510,17 +517,21 @@ export default function SettingsPage() {
           </div>
 
           <div>
-            <div className="flex items-center gap-3 mb-2">
+            <div className="flex items-center justify-between mb-2">
               <label className="block text-sm font-medium text-gray-700">Quiet Hours</label>
-              <label className="flex items-center gap-1.5 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={settings.quiet_hours_enabled}
-                  onChange={(e) => setSettings({ ...settings, quiet_hours_enabled: e.target.checked })}
-                  className="rounded text-primary-600 focus:ring-primary-500"
+              <button
+                type="button"
+                onClick={() => setSettings({ ...settings, quiet_hours_enabled: !settings.quiet_hours_enabled })}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
+                  settings.quiet_hours_enabled ? 'bg-primary-600' : 'bg-gray-200'
+                }`}
+              >
+                <span
+                  className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
+                    settings.quiet_hours_enabled ? 'translate-x-6' : 'translate-x-1'
+                  }`}
                 />
-                <span className="text-xs text-gray-500">Enabled</span>
-              </label>
+              </button>
             </div>
             <div className={`flex items-center gap-3 ${!settings.quiet_hours_enabled ? 'opacity-40 pointer-events-none' : ''}`}>
               <input
@@ -540,7 +551,7 @@ export default function SettingsPage() {
             <p className="text-xs text-gray-500 mt-1">
               {settings.quiet_hours_enabled
                 ? 'Engagements will be deferred until quiet hours end'
-                : 'Quiet hours disabled. Engagements will run 24/7'}
+                : 'Quiet hours disabled — engagements run immediately, 24/7'}
             </p>
           </div>
         </div>

@@ -56,7 +56,12 @@ export interface AuditLogEntry {
 }
 
 export interface IntegrationStatus {
-  linkedin: { connected: boolean; active: boolean; has_session_cookies?: boolean }
+  linkedin: {
+    connected: boolean
+    active: boolean
+    has_session_cookies?: boolean
+    user_name?: string | null
+  }
   meta: { connected: boolean; active: boolean }
   whatsapp: { connected: boolean; active: boolean }
 }

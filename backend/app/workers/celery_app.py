@@ -10,6 +10,7 @@ celery_app = Celery(
         "app.workers.polling_tasks",
         "app.workers.engagement_tasks",
         "app.workers.session_monitor",
+        "app.workers.stale_actions",
     ],
 )
 
@@ -30,6 +31,10 @@ celery_app.conf.update(
         "check-linkedin-sessions": {
             "task": "app.workers.session_monitor.check_linkedin_sessions",
             "schedule": 21600.0,  # Every 6 hours
+        },
+        "cleanup-stale-actions": {
+            "task": "app.workers.stale_actions.cleanup_stale_actions",
+            "schedule": 600.0,  # Every 10 minutes
         },
     },
 )
