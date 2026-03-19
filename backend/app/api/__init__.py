@@ -10,10 +10,12 @@ from app.api.teams import router as teams_router
 from app.api.tracked_pages import router as tracked_pages_router
 from app.api.users import router as users_router
 from app.api.webhooks import router as webhooks_router
+from app.api.ws import router as ws_router
 
 api_router = APIRouter(prefix="/api")
 
 api_router.include_router(auth_router)
+api_router.include_router(ws_router)
 api_router.include_router(users_router)
 api_router.include_router(tracked_pages_router)
 api_router.include_router(integrations_router)

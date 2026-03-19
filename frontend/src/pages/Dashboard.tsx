@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import api from '../api/client'
+import { useWebSocketEvents, WebSocketMessage } from '../api/ws'
 import { SectionLoading } from '../components/Loading'
 import { useAuth } from '../lib/auth'
 import type { ActivityFeedItem, AnalyticsSummary, IntegrationStatus } from '../lib/types'
@@ -11,6 +12,31 @@ export default function Dashboard() {
   const [integrations, setIntegrations] = useState<IntegrationStatus | null>(null)
   const [activity, setActivity] = useState<ActivityFeedItem[]>([])
   const [loading, setLoading] = useState(true)
+
+  const handleWebSocketMessage = useCallback((message: WebSocketMessage) => {
+    if (message.type === 'activity_feed') {
+      const payload = message.payload as ActivityFeedItem;
+      setActivity(prev => {
+        const newFeed = [payload, ...prev];
+        return newFeed.slice(0, 50); // Keep max 50 items
+      });
+
+      // Update analytics summary based on the new event
+      setAnalytics(prev => {
+        if (!prev) return prev;
+        const newAnalytics = { ...prev, likes: { ...prev.likes }, comments: { ...prev.comments } };
+
+        const actionType = payload.type.startsWith('like') ? 'likes' : 'comments';
+        const actionStatus = payload.type.includes('completed') ? 'completed' : 'failed';
+
+        newAnalytics[actionType][actionStatus] = (newAnalytics[actionType][actionStatus] || 0) + 1;
+
+        return newAnalytics;
+      });
+    }
+  }, []);
+
+  useWebSocketEvents({ onMessage: handleWebSocketMessage });
 
   useEffect(() => {
     const fetchData = async () => {
@@ -199,7 +225,7 @@ function ActivityItem({ item }: { item: ActivityFeedItem }) {
   })()
 
   return (
-    <div className={`flex items-start gap-3 p-3 rounded-lg ${isFailed ? 'bg-red-50' : isCompleted ? 'bg-gray-50' : 'bg-yellow-50'}`}>
+    <div key={item.id || item.timestamp} className={`flex items-start gap-3 p-3 rounded-lg ${isFailed ? 'bg-red-50' : isCompleted ? 'bg-gray-50' : 'bg-yellow-50'}`}>
       <span className="text-lg flex-shrink-0">{icon}</span>
       <div className="flex-1 min-w-0">
         <p className={`text-sm ${isFailed ? 'text-red-700' : 'text-gray-700'}`}>

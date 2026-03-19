@@ -46,6 +46,7 @@ class CommentGenerateResponse(BaseModel):
 
 
 class ActivityFeedItem(BaseModel):
+    id: str | None = None
     type: str  # like_completed, comment_completed, comment_failed, post_discovered, etc.
     user_name: str
     post_url: str | None = None
