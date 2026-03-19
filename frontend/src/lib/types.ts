@@ -129,6 +129,7 @@ export interface AvoidPhrase {
 }
 
 export interface ActivityFeedItem {
+  id?: string
   type: string
   user_name: string
   post_url: string | null

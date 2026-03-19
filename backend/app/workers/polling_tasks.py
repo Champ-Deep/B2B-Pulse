@@ -185,6 +185,15 @@ async def _poll_page_by_id(tracked_page_id: str):
 
         await db.commit()
 
+        # Broadcast poll status event to WebSockets
+        from app.core.events import broadcast_event
+        ws_payload = {
+            "page_id": str(page.id),
+            "page_name": page.name,
+            **status_payload
+        }
+        await broadcast_event(page.org_id, "poll_status", ws_payload)
+
 
 async def _poll_single_page(db, page) -> dict:
     """Poll a single tracked page for new posts.
@@ -310,7 +319,6 @@ async def _poll_linkedin_api(db, page) -> list[dict]:
 
     Falls back gracefully if no cookies are present (directing users to sign in again).
     """
-    from app.models.tracked_page import PageType
 
     cookies = await _get_linkedin_cookies(db, page.org_id)
     if not cookies:

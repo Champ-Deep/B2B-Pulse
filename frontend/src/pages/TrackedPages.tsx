@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import api from '../api/client'
+import { useWebSocketEvents, WebSocketMessage } from '../api/ws'
 import { PlatformBadge } from '../components/Badge'
 import { PageLoading } from '../components/Loading'
 import Modal from '../components/Modal'
@@ -44,6 +45,34 @@ export default function TrackedPages() {
 
   // Poll status per page
   const [pollStatuses, setPollStatuses] = useState<Record<string, PollStatus>>({})
+
+  const handleWebSocketMessage = useCallback((message: WebSocketMessage) => {
+    if (message.type === 'poll_status') {
+      const payload = message.payload;
+      const { page_id, ...statusData } = payload;
+
+      setPollStatuses(prev => ({
+        ...prev,
+        [page_id]: statusData as PollStatus
+      }));
+
+      // If we're looking at posts for this page and there are new ones, we could auto-refresh
+      if (expandedPageId === page_id && statusData.new_posts > 0) {
+        // Option 1: auto-refresh posts
+        handleTogglePosts(page_id, true); // true = force refresh
+      }
+    } else if (message.type === 'like_completed' || message.type === 'like_failed' ||
+               message.type === 'comment_completed' || message.type === 'comment_failed') {
+       // Optional: update engagement badge in expanded posts panel if a post is visible
+       if (expandedPageId && pagePosts.length > 0) {
+         // The event doesn't contain the post_id out of the box so we would
+         // need to refresh the expanded page posts to get the new status
+         // Or update the backend to include post_id in the activity_feed
+       }
+    }
+  }, [expandedPageId]); // Include expandedPageId so it has the latest value
+
+  useWebSocketEvents({ onMessage: handleWebSocketMessage });
 
   const fetchPages = async () => {
     try {
@@ -203,8 +232,8 @@ export default function TrackedPages() {
     }
   }
 
-  const handleTogglePosts = async (pageId: string) => {
-    if (expandedPageId === pageId) {
+  const handleTogglePosts = async (pageId: string, forceRefresh = false) => {
+    if (expandedPageId === pageId && !forceRefresh) {
       setExpandedPageId(null)
       setPagePosts([])
       return

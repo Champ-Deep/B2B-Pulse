@@ -6,6 +6,7 @@ Create Date: 2026-02-26
 """
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "005_poll_status_persistent"

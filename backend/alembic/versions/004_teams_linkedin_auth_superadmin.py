@@ -13,8 +13,9 @@ Create Date: 2026-02-26
 """
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 revision = "004_teams_linkedin_auth"
 down_revision = "003_indexes_constraints"

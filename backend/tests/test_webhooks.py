@@ -1,6 +1,5 @@
 """Tests for WhatsApp webhook endpoint."""
 
-import uuid
 from unittest.mock import patch
 
 import pytest
@@ -35,7 +34,7 @@ async def _create_tracked_page(db: AsyncSession) -> TrackedPage:
 
 
 @pytest.mark.asyncio
-@patch("app.api.webhooks.schedule_staggered_engagements")
+@patch("app.workers.engagement_tasks.schedule_staggered_engagements.delay")
 async def test_webhook_creates_post_and_enqueues(mock_task, client: AsyncClient, db: AsyncSession):
     page = await _create_tracked_page(db)
 
@@ -61,11 +60,11 @@ async def test_webhook_creates_post_and_enqueues(mock_task, client: AsyncClient,
     assert post.platform == Platform.LINKEDIN
 
     # Verify Celery task was called
-    mock_task.delay.assert_called_once_with(str(post.id), str(page.id))
+    mock_task.assert_called_once_with(str(post.id), str(page.id))
 
 
 @pytest.mark.asyncio
-@patch("app.api.webhooks.schedule_staggered_engagements")
+@patch("app.workers.engagement_tasks.schedule_staggered_engagements.delay")
 async def test_webhook_deduplicates(mock_task, client: AsyncClient, db: AsyncSession):
     await _create_tracked_page(db)
     url = "https://www.linkedin.com/posts/johndoe_same-post-7123456789-abcd"
@@ -85,7 +84,7 @@ async def test_webhook_deduplicates(mock_task, client: AsyncClient, db: AsyncSes
     assert res2.json()["status"] == "duplicate"
 
     # Celery should only have been called once
-    assert mock_task.delay.call_count == 1
+    assert mock_task.call_count == 1
 
 
 @pytest.mark.asyncio

@@ -82,17 +82,31 @@ async def client(db: AsyncSession) -> AsyncClient:
 
 
 @pytest.fixture
-async def auth_headers(client: AsyncClient) -> dict:
-    """Sign up a test user and return auth headers."""
-    response = await client.post(
-        "/api/auth/signup",
-        json={
-            "email": f"test-{uuid.uuid4().hex[:8]}@example.com",
-            "password": "testpassword123",
-            "full_name": "Test User",
-            "org_name": "Test Org",
-        },
+async def auth_headers(client: AsyncClient, db: AsyncSession) -> dict:
+    """Create a test user and return auth headers."""
+    from app.models.org import Org
+    from app.models.user import User, UserRole, UserProfile
+    from app.core.security import create_access_token
+
+    org = Org(name="Test Org")
+    db.add(org)
+    await db.flush()
+
+    user = User(
+        email=f"test-{uuid.uuid4().hex[:8]}@example.com",
+        full_name="Test User",
+        org_id=org.id,
+        role=UserRole.OWNER,
+        is_active=True,
     )
-    assert response.status_code == 201
-    token = response.json()["access_token"]
+    db.add(user)
+    await db.flush()
+
+    profile = UserProfile(user_id=user.id)
+    db.add(profile)
+    await db.commit()
+
+    token_data = {"sub": str(user.id), "org_id": str(org.id)}
+    token = create_access_token(token_data)
+
     return {"Authorization": f"Bearer {token}"}

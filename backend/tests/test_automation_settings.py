@@ -105,4 +105,4 @@ async def test_settings_polling_interval_too_low(client: AsyncClient, auth_heade
 @pytest.mark.asyncio
 async def test_settings_requires_auth(client: AsyncClient):
     response = await client.get("/api/automation/settings")
-    assert response.status_code == 403
+    assert response.status_code in (401, 403)

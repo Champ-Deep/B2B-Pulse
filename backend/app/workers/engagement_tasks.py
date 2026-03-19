@@ -448,10 +448,11 @@ async def _execute_engagement(engagement_action_id: str):
             )
 
         # Write audit log
+        audit_action = f"{action.action_type.value}_{action.status.value}"
         audit = AuditLog(
             org_id=user.org_id,
             user_id=user.id,
-            action=f"{action.action_type.value}_{action.status.value}",
+            action=audit_action,
             target_type="post",
             target_id=str(post.id),
             metadata_={
@@ -462,6 +463,25 @@ async def _execute_engagement(engagement_action_id: str):
         )
         db.add(audit)
         await db.commit()
+
+        # Broadcast activity event to WebSockets
+        from app.core.events import broadcast_event
+        from app.models.tracked_page import TrackedPage
+
+        page_result = await db.execute(select(TrackedPage).where(TrackedPage.id == post.tracked_page_id))
+        page = page_result.scalar_one_or_none()
+
+        activity_payload = {
+            "id": str(audit.id) if audit.id else None,
+            "type": audit_action,
+            "user_name": user.full_name,
+            "post_url": post.url,
+            "page_name": page.name if page else None,
+            "timestamp": (action.completed_at or action.created_at).isoformat(),
+            "comment_text": action.comment_text,
+            "error": action.error_message
+        }
+        await broadcast_event(user.org_id, "activity_feed", activity_payload)
 
 
 def _get_comment_platform(platform_value: str, post_url: str) -> str:
