@@ -15,9 +15,9 @@ async def _get_user_cookies(user_id: str) -> list[dict] | None:
 
     from sqlalchemy import select
 
+    from app.core.security import decrypt_value
     from app.database import get_task_session
     from app.models.integration import IntegrationAccount, Platform
-    from app.core.security import decrypt_value
 
     async with get_task_session() as db:
         result = await db.execute(
@@ -75,10 +75,10 @@ async def validate_session_cookies(cookies: list[dict]) -> dict:
       - user_name: str | None (display name if extracted)
       - user_id: str | None (LinkedIn user ID if extracted)
     """
-    import os
     import random
 
     from playwright.async_api import async_playwright
+
     from app.automation.browser_manager import get_proxy_url
 
     result = {"valid": False, "user_name": None, "user_id": None}
@@ -277,6 +277,7 @@ async def scrape_profile_posts(profile_url: str, cookies: list[dict] | None = No
     import random
 
     from playwright.async_api import async_playwright
+
     from app.automation.browser_manager import get_proxy_url
 
     posts = []

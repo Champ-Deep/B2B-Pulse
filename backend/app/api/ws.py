@@ -1,13 +1,11 @@
 import asyncio
-import json
 import logging
 import uuid
-from typing import Any
 
+import redis.asyncio as redis_async
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-import redis.asyncio as redis_async
 
 from app.config import settings
 from app.core.security import decode_token

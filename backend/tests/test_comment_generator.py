@@ -1,7 +1,7 @@
 """Tests for the comment generator, including platform-specific tone."""
 
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -81,7 +81,7 @@ class TestGenerateComments:
         mock_call.return_value = _mock_openrouter_response(
             json.dumps({"comments": ["Nice!"]})
         )
-        result = await generate_comments("Post content", platform="meta")
+        await generate_comments("Post content", platform="meta")
         call_args = mock_call.call_args
         system_msg = call_args[0][1][0]["content"]
         assert "friendly" in system_msg.lower()
@@ -103,7 +103,7 @@ class TestGenerateComments:
         mock_call.return_value = _mock_openrouter_response(
             json.dumps({"comments": ["Insightful take"]})
         )
-        result = await generate_comments("Post content")
+        await generate_comments("Post content")
         call_args = mock_call.call_args
         system_msg = call_args[0][1][0]["content"]
         assert "professional" in system_msg.lower()

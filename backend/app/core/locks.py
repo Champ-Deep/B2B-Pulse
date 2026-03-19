@@ -23,8 +23,8 @@ Usage with context manager:
 
 import logging
 import uuid
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Generator, Optional
 
 import redis as sync_redis
 
@@ -52,7 +52,7 @@ class UserLock:
         self.action = action
         self.ttl = ttl
         self.lock_key = f"{LOCK_PREFIX}{action}:{user_id}"
-        self._redis: Optional[sync_redis.Redis] = None
+        self._redis: sync_redis.Redis | None = None
         self._lock_id = str(uuid.uuid4())
         self._acquired = False
 
@@ -150,7 +150,7 @@ class UserLock:
 
 def acquire_user_lock(
     user_id: str, action: str, blocking: bool = False, timeout: int = 30
-) -> Optional[UserLock]:
+) -> UserLock | None:
     """Try to acquire a user lock.
 
     Returns:

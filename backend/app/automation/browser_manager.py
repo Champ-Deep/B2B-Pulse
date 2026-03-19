@@ -4,8 +4,6 @@ import os
 import random
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Optional
 
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 

@@ -319,7 +319,6 @@ async def _poll_linkedin_api(db, page) -> list[dict]:
 
     Falls back gracefully if no cookies are present (directing users to sign in again).
     """
-    from app.models.tracked_page import PageType
 
     cookies = await _get_linkedin_cookies(db, page.org_id)
     if not cookies:

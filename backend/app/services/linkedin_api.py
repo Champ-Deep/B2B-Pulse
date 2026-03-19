@@ -9,6 +9,7 @@ Relevant LinkedIn API docs:
   - Organization lookup: https://api.linkedin.com/v2/organizations?q=vanityName&vanityName=<slug>
 """
 
+import contextlib
 import logging
 import re
 import urllib.parse
@@ -175,20 +176,18 @@ def _parse_ugc_posts(elements: list) -> list[dict]:
         post_id = el.get("id", "")
         # Build the public post URL from the URN
         # UGC post IDs look like 'urn:li:ugcPost:7210000000000000000'
-        urn_id = post_id.split(":")[-1] if ":" in post_id else post_id
+        post_id.split(":")[-1] if ":" in post_id else post_id
         post_url = f"https://www.linkedin.com/feed/update/{post_id}/"
 
         # Extract text content
         content = ""
-        try:
+        with contextlib.suppress(AttributeError, KeyError):
             content = (
                 el.get("specificContent", {})
                 .get("com.linkedin.ugc.ShareContent", {})
                 .get("shareCommentary", {})
                 .get("text", "")
             )
-        except (AttributeError, KeyError):
-            pass
 
         if post_id:
             results.append({
@@ -207,7 +206,7 @@ def _parse_shares(elements: list) -> list[dict]:
         post_url = f"https://www.linkedin.com/feed/update/urn:li:share:{share_id}/"
 
         content = ""
-        try:
+        with contextlib.suppress(AttributeError, KeyError):
             content = (
                 el.get("text", {}).get("text", "")
                 or el.get("specificContent", {})
@@ -215,8 +214,6 @@ def _parse_shares(elements: list) -> list[dict]:
                 .get("shareCommentary", {})
                 .get("text", "")
             )
-        except (AttributeError, KeyError):
-            pass
 
         if share_id:
             results.append({

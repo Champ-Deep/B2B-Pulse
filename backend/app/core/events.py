@@ -1,3 +1,4 @@
+import contextlib
 import json
 import logging
 from typing import Any
@@ -32,7 +33,5 @@ async def broadcast_event(org_id: str | Any, event_type: str, payload: dict):
     except Exception as e:
         logger.error(f"Failed to broadcast event {event_type} to {org_id}: {e}")
     finally:
-        try:
+        with contextlib.suppress(Exception):
             await r.close()
-        except Exception:
-            pass

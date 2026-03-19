@@ -12,7 +12,7 @@ import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 
 from app.automation.linkedin_actions import check_session_valid
 from app.database import get_task_session

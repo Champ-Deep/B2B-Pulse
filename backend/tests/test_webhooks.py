@@ -1,6 +1,5 @@
 """Tests for WhatsApp webhook endpoint."""
 
-import uuid
 from unittest.mock import patch
 
 import pytest

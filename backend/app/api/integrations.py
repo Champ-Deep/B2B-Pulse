@@ -62,8 +62,8 @@ async def linkedin_callback(
     # Exchange code for token using shared utility
     try:
         token_data = await exchange_code_for_token(code, settings.linkedin_redirect_uri)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Failed to exchange LinkedIn OAuth code")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="Failed to exchange LinkedIn OAuth code") from e
 
     user_id = await validate_oauth_state(state)
     if not user_id:
