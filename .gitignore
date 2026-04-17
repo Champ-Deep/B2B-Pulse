@@ -38,6 +38,16 @@ docker-compose.override.yml
 # Playwright
 playwright/.cache/
 
+# Chrome extension local-only artifacts
+linkedin-extension/key.pem
+linkedin-extension/pubkey.b64
+
+# Celery runtime state
+backend/celerybeat-schedule
+
+# Local Claude Code metadata
+.claude/
+
 # WhatsApp session
 whatsapp-sidecar/.wwebjs_auth/
 whatsapp-sidecar/.wwebjs_cache/

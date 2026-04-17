@@ -73,16 +73,22 @@ async def _check_sessions():
                 if is_valid:
                     valid_count += 1
                     logger.debug(f"Session valid for user {user_id}")
+                    # Clear any prior needs_reconnect flag set by a previous run.
+                    current_settings = integration.settings or {}
+                    if current_settings.get("needs_reconnect"):
+                        integration.settings = {**current_settings, "needs_reconnect": False}
                 else:
                     invalid_count += 1
-                    # Mark integration as inactive
+                    # Mark integration as inactive and flag for user-visible reconnect.
                     integration.is_active = False
-                    logger.warning(f"Session expired for user {user_id}, marked inactive")
-
-                    # Could extend this to:
-                    # - Send email notification to user
-                    # - Update a status field to show "expired" in UI
-                    # - Trigger a webhook to notify the app
+                    current_settings = integration.settings or {}
+                    integration.settings = {
+                        **current_settings,
+                        "needs_reconnect": True,
+                        "reconnect_reason": "session_invalid",
+                        "reconnect_flagged_at": now.isoformat(),
+                    }
+                    logger.warning(f"Session expired for user {user_id}, needs_reconnect=true")
 
             except Exception as e:
                 # Still update last_session_check even on error

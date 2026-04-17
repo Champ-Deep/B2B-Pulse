@@ -2,6 +2,7 @@ import { Outlet, NavLink } from 'react-router-dom'
 import { Home, Archive, User, Settings, Users, ClipboardList, Shield } from 'lucide-react'
 import { useAuth } from '../lib/auth'
 import { ROUTES } from '../lib/routes'
+import ReconnectBanner from './ReconnectBanner'
 
 const navItems = [
   { to: ROUTES.HOME, label: 'Dashboard', icon: Home },
@@ -77,8 +78,9 @@ export default function Layout() {
       </aside>
 
       {/* Main content */}
-      <main className="flex-1 overflow-auto">
-        <div className="p-8">
+      <main className="flex-1 overflow-auto flex flex-col">
+        <ReconnectBanner />
+        <div className="p-8 flex-1">
           <Outlet />
         </div>
       </main>

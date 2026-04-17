@@ -7,7 +7,7 @@ services:
       POSTGRES_PASSWORD: autoengage_dev
       POSTGRES_DB: autoengage
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -33,7 +33,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     ports:
-      - "8000:8000"
+      - "8001:8000"
     env_file:
       - .env
     volumes:
@@ -105,7 +105,8 @@ services:
       - ./frontend:/app
       - /app/node_modules
     environment:
-      - VITE_API_URL=http://localhost:8000/api
+      - VITE_API_URL=http://localhost:8001/api
+      - VITE_EXTENSION_ID=${VITE_EXTENSION_ID:-hmaaogphomlflfebfobfhfbnhaffllej}
 
   whatsapp-sidecar:
     build:

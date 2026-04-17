@@ -1,0 +1,62 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>ChampMail Connector</title>
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        margin: 0;
+        padding: 16px;
+        width: 280px;
+        color: #0f172a;
+        background: #ffffff;
+      }
+      h1 { margin: 0 0 12px; font-size: 15px; }
+      .status {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 12px;
+        border-radius: 8px;
+        background: #f1f5f9;
+        font-size: 13px;
+      }
+      .dot { width: 10px; height: 10px; border-radius: 999px; background: #94a3b8; flex: 0 0 auto; }
+      .dot.ok { background: #10b981; }
+      .dot.warn { background: #f59e0b; }
+      .dot.err { background: #ef4444; }
+      .meta { margin: 10px 0 0; font-size: 12px; color: #475569; line-height: 1.5; }
+      .meta b { color: #0f172a; }
+      .actions { display: flex; gap: 8px; margin-top: 14px; }
+      button {
+        flex: 1;
+        padding: 8px 10px;
+        border-radius: 6px;
+        border: 1px solid #cbd5e1;
+        background: #fff;
+        cursor: pointer;
+        font-size: 12px;
+      }
+      button.primary { background: #0f172a; color: #fff; border-color: #0f172a; }
+      button:disabled { opacity: 0.5; cursor: not-allowed; }
+      .hint { margin-top: 10px; font-size: 11px; color: #64748b; }
+      a { color: #2563eb; text-decoration: none; }
+    </style>
+  </head>
+  <body>
+    <h1>ChampMail Connector</h1>
+    <div class="status">
+      <span class="dot" id="dot"></span>
+      <span id="label">Loading…</span>
+    </div>
+    <div class="meta" id="meta"></div>
+    <div class="actions">
+      <button id="sync" class="primary">Sync now</button>
+      <button id="disconnect">Disconnect</button>
+    </div>
+    <div class="hint" id="hint"></div>
+    <script src="popup.js"></script>
+  </body>
+</html>

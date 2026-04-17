@@ -5,6 +5,7 @@ export const ROUTES = {
   AUTH_CALLBACK: '/auth/callback',
   PRODUCT: '/product',
   ONBOARDING: '/onboarding',
+  ONBOARDING_LINKEDIN: '/onboarding/linkedin',
   TRACKED_PAGES: '/tracked-pages',
   SETTINGS: '/settings',
   TEAM: '/team',

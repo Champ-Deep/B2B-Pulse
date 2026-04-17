@@ -12,6 +12,7 @@ import Signup from './pages/Signup'
 import AuthCallback from './pages/AuthCallback'
 import Dashboard from './pages/Dashboard'
 import Onboarding from './pages/Onboarding'
+import OnboardingLinkedIn from './pages/OnboardingLinkedIn'
 import TrackedPages from './pages/TrackedPages'
 import AutomationSettings from './pages/AutomationSettings'
 import AuditLog from './pages/AuditLog'
@@ -76,6 +77,7 @@ function App() {
             <Route element={user ? <Layout /> : <Navigate to={ROUTES.LOGIN} />}>
               <Route path={ROUTES.HOME} element={<Dashboard />} />
               <Route path={ROUTES.ONBOARDING} element={<Onboarding />} />
+              <Route path={ROUTES.ONBOARDING_LINKEDIN} element={<OnboardingLinkedIn />} />
               <Route path={ROUTES.TRACKED_PAGES} element={<TrackedPages />} />
               <Route path={ROUTES.SETTINGS} element={<AutomationSettings />} />
               <Route path={ROUTES.TEAM} element={<Team />} />

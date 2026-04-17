@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "ChampMail Connector (dev)",
+  "short_name": "ChampMail",
+  "version": "0.1.0",
+  "description": "Syncs your LinkedIn session with ChampMail so you can automate your own engagement without sharing a password.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzMxSN10INcgXiA52way4NYkzHL6SEWQO1hxn49wrWpBhEw6m1t/qxdBuUW96Di537UT5jYMmLQDD7DPNT0GRNRl2I4FIsYjcrerGGo8BO62UTBFUQcenhbIPFhUAAPTeWNbFrW1z+Sj7CcRiMV4p9XIpZKJJ/T3X9slVPQ3oA5wOOQuvBmvIFcOLq5189gl0ToasJ4JDsbcSyG5h+tuBnjn3lhJdCAP70lGuZXGz5GUn5UB7INBf+2PJbv0UMNzrQBUR4e6eDHyYFvXLEL+gybVs13OoJa9FjKtfopVv61B2NkHOKmfidNc1RdKKoeWk4tf8DpyfuNAZYVRn3JfvFwIDAQAB",
+  "permissions": ["cookies", "storage", "alarms", "notifications"],
+  "host_permissions": [
+    "*://*.linkedin.com/*",
+    "http://localhost:8001/*",
+    "http://127.0.0.1:8001/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "ChampMail Connector",
+    "default_icon": {
+      "16": "icons/16.png",
+      "48": "icons/48.png",
+      "128": "icons/128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/16.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "externally_connectable": {
+    "matches": [
+      "http://localhost:5173/*",
+      "http://127.0.0.1:5173/*"
+    ]
+  }
+}

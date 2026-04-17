@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     app_env: str = "development"
     cors_origins: str = "http://localhost:5173"
 
+    # Public URL this backend is reachable at (used by the browser extension
+    # to know where to POST cookies). Defaults to the local dev port.
+    api_base_url: str = "http://localhost:8001"
+
     # Database
     database_url: str
 
@@ -68,6 +72,27 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",")]
+
+    @property
+    def cors_origin_regex(self) -> str:
+        """Regex form of CORS_ORIGINS, supporting wildcard schemes like chrome-extension://*.
+
+        Each comma-separated entry becomes an alternation. `*` in any entry is
+        translated to `.*` so browser extension origins (which have random IDs)
+        can be matched without listing them explicitly.
+        """
+        import re
+
+        parts = []
+        for origin in self.cors_origin_list:
+            if not origin:
+                continue
+            # Escape the origin, then un-escape * -> .*
+            escaped = re.escape(origin).replace(r"\*", r".*")
+            parts.append(escaped)
+        if not parts:
+            return r"^$"
+        return r"^(?:" + "|".join(parts) + r")$"
 
 
 settings = Settings()

@@ -120,43 +120,74 @@ class LinkedInCookiesRequest(BaseModel):
     li_at: str = Field(..., min_length=10, description="LinkedIn li_at cookie value")
 
 
-@router.post("/linkedin/session-cookies", summary="Save LinkedIn Session Cookies")
-async def save_linkedin_session_cookies(
-    body: LinkedInCookiesRequest,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Save LinkedIn browser session cookies for authenticated scraping."""
-    cookies = [
-        {"name": "li_at", "value": body.li_at, "domain": ".linkedin.com", "path": "/"},
-    ]
+# Realistic LinkedIn li_at TTL is ~30 days (was 365d, overly optimistic).
+LINKEDIN_SESSION_TTL_DAYS = 30
 
-    # Validate cookies by navigating to LinkedIn
+
+async def persist_linkedin_session(
+    *,
+    db: AsyncSession,
+    user_id,
+    li_at: str,
+    source: str,
+    jsessionid: str | None = None,
+) -> dict:
+    """Validate a LinkedIn `li_at` cookie and upsert it onto the user's IntegrationAccount.
+
+    Writes a unified schema into `session_cookies` so the worker doesn't branch
+    on which path captured the cookie:
+
+        {
+          "li_at": "...",
+          "JSESSIONID": "..." (optional),
+          "captured_at": ISO-8601,
+          "source": "paste" | "extension" | "playwright",
+        }
+
+    Backwards-compat: historically this field held a JSON-encoded list of
+    Playwright cookie dicts. `_get_user_cookies()` in linkedin_actions.py
+    handles both shapes, but new writes use the dict form above.
+
+    Raises HTTPException(400) if the cookie fails live validation against LinkedIn.
+    Returns a dict with keys: user_name, user_id, session_expires_at, last_session_check.
+    """
+    # Live-validate by navigating LinkedIn feed. Uses the legacy list-of-cookies
+    # shape because that's what Playwright's add_cookies() wants.
     from app.automation.linkedin_actions import validate_session_cookies
 
-    validation_result = await validate_session_cookies(cookies)
+    validation_cookies = [
+        {"name": "li_at", "value": li_at, "domain": ".linkedin.com", "path": "/"},
+    ]
+    if jsessionid:
+        validation_cookies.append(
+            {"name": "JSESSIONID", "value": jsessionid, "domain": ".linkedin.com", "path": "/"},
+        )
+
+    validation_result = await validate_session_cookies(validation_cookies)
     if not validation_result.get("valid"):
         raise HTTPException(
             status_code=400,
             detail="Invalid or expired LinkedIn cookie. Make sure you copied the full li_at value.",
         )
 
-    # Encrypt cookies before storing
-    encrypted_cookies = encrypt_value(json.dumps(cookies))
+    now = datetime.now(UTC)
+    payload = {
+        "li_at": li_at,
+        "captured_at": now.isoformat(),
+        "source": source,
+    }
+    if jsessionid:
+        payload["JSESSIONID"] = jsessionid
 
-    # Get user info from validation
-    user_name = validation_result.get("user_name")
-    user_id = validation_result.get("user_id")
+    encrypted_cookies = encrypt_value(json.dumps(payload))
+    session_expires = now + timedelta(days=LINKEDIN_SESSION_TTL_DAYS)
 
-    # Set session expiry (li_at typically lasts ~1 year from last login)
-    from datetime import UTC, timedelta
+    linkedin_user_name = validation_result.get("user_name")
+    linkedin_user_id = validation_result.get("user_id")
 
-    session_expires = datetime.now(UTC) + timedelta(days=365)
-
-    # Upsert session cookies on the user's LinkedIn integration
     result = await db.execute(
         select(IntegrationAccount).where(
-            IntegrationAccount.user_id == current_user.id,
+            IntegrationAccount.user_id == user_id,
             IntegrationAccount.platform == Platform.LINKEDIN,
         )
     )
@@ -164,32 +195,57 @@ async def save_linkedin_session_cookies(
 
     if integration:
         integration.session_cookies = encrypted_cookies
-        # Use dedicated columns
-        if user_name:
-            integration.linkedin_user_name = user_name
-        if user_id:
-            integration.linkedin_user_id = user_id
+        if linkedin_user_name:
+            integration.linkedin_user_name = linkedin_user_name
+        if linkedin_user_id:
+            integration.linkedin_user_id = linkedin_user_id
         integration.session_expires_at = session_expires
-        integration.last_session_check = datetime.now(UTC)
+        integration.last_session_check = now
+        # Clear any stale "needs reconnect" flag the watcher may have set.
+        current_settings = integration.settings or {}
+        if current_settings.get("needs_reconnect"):
+            current_settings = {**current_settings, "needs_reconnect": False}
+            integration.settings = current_settings
     else:
         integration = IntegrationAccount(
-            user_id=current_user.id,
+            user_id=user_id,
             platform=Platform.LINKEDIN,
             session_cookies=encrypted_cookies,
-            linkedin_user_name=user_name,
-            linkedin_user_id=user_id,
+            linkedin_user_name=linkedin_user_name,
+            linkedin_user_id=linkedin_user_id,
             session_expires_at=session_expires,
-            last_session_check=datetime.now(UTC),
+            last_session_check=now,
         )
         db.add(integration)
 
     await db.commit()
-    logger.info(f"Saved LinkedIn session cookies for user {current_user.id}")
+    logger.info(f"Saved LinkedIn session for user {user_id} (source={source})")
 
+    return {
+        "user_name": linkedin_user_name,
+        "user_id": linkedin_user_id,
+        "session_expires_at": session_expires,
+        "last_session_check": now,
+    }
+
+
+@router.post("/linkedin/session-cookies", summary="Save LinkedIn Session Cookies")
+async def save_linkedin_session_cookies(
+    body: LinkedInCookiesRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Save LinkedIn browser session cookies for authenticated scraping (paste path)."""
+    result = await persist_linkedin_session(
+        db=db,
+        user_id=current_user.id,
+        li_at=body.li_at,
+        source="paste",
+    )
     return {
         "status": "valid",
         "message": "LinkedIn session cookies saved",
-        "user_name": user_name,
+        "user_name": result["user_name"],
     }
 
 
@@ -224,11 +280,32 @@ async def get_linkedin_session_status(
     if integration and integration.last_session_check:
         last_check = integration.last_session_check.isoformat()
 
+    needs_reconnect = False
+    source = None
+    if integration:
+        settings_blob = integration.settings or {}
+        needs_reconnect = bool(settings_blob.get("needs_reconnect"))
+        # Decrypt just enough to read the source tag; tolerate legacy shapes.
+        if integration.session_cookies:
+            try:
+                from app.core.security import decrypt_value
+
+                raw = integration.session_cookies
+                if isinstance(raw, str):
+                    decoded = json.loads(decrypt_value(raw))
+                    if isinstance(decoded, dict):
+                        source = decoded.get("source")
+            except Exception:
+                source = None
+
     return {
         "has_session_cookies": has_cookies,
         "user_name": user_name,
         "session_expires_at": session_expires,
         "last_session_check": last_check,
+        "needs_reconnect": needs_reconnect,
+        "source": source,
+        "is_active": bool(integration and integration.is_active),
     }
 
 
@@ -388,14 +465,21 @@ async def _auto_cleanup_session(session_id: str):
     await _cleanup_login_session(session_id)
 
 
-def _check_rate_limit(user_id: str) -> bool:
-    """Return True if the user is within the login attempt rate limit."""
+def _check_rate_limit(user_id: str) -> tuple[bool, int]:
+    """Check the Playwright-login rate limit.
+
+    Returns (allowed, retry_after_seconds). When not allowed, retry_after is
+    the wait until the oldest attempt falls out of the 1-hour window.
+    """
     now = datetime.now(UTC)
     cutoff = now - timedelta(hours=1)
-    attempts = _login_attempt_counts.get(user_id, [])
-    attempts = [t for t in attempts if t > cutoff]
+    attempts = [t for t in _login_attempt_counts.get(user_id, []) if t > cutoff]
     _login_attempt_counts[user_id] = attempts
-    return len(attempts) < _MAX_LOGIN_ATTEMPTS_PER_HOUR
+    if len(attempts) < _MAX_LOGIN_ATTEMPTS_PER_HOUR:
+        return True, 0
+    oldest = min(attempts)
+    retry_after = int((oldest + timedelta(hours=1) - now).total_seconds())
+    return False, max(retry_after, 1)
 
 
 class LoginStartRequest(BaseModel):
@@ -420,10 +504,15 @@ async def linkedin_login_start(
     """
     user_id = str(current_user.id)
 
-    if not _check_rate_limit(user_id):
+    allowed, retry_after = _check_rate_limit(user_id)
+    if not allowed:
         raise HTTPException(
             status_code=429,
-            detail="Too many login attempts. Please try again later or use the cookie paste method.",
+            detail={
+                "message": "Too many login attempts. Please try again later or use the extension/paste method.",
+                "retry_after_seconds": retry_after,
+            },
+            headers={"Retry-After": str(retry_after)},
         )
 
     _login_attempt_counts.setdefault(user_id, []).append(datetime.now(UTC))
@@ -604,27 +693,26 @@ async def linkedin_login_verify(
 
 
 async def _save_login_cookies(db: AsyncSession, user_id, session_cookies: list[dict]):
-    """Save extracted LinkedIn session cookies to the user's integration."""
-    # Encrypt cookies before storing
-    encrypted_cookies = encrypt_value(json.dumps(session_cookies))
+    """Save extracted LinkedIn session cookies from the Playwright login flow.
 
-    result = await db.execute(
-        select(IntegrationAccount).where(
-            IntegrationAccount.user_id == user_id,
-            IntegrationAccount.platform == Platform.LINKEDIN,
-        )
-    )
-    integration = result.scalar_one_or_none()
-
-    if integration:
-        integration.session_cookies = encrypted_cookies
-    else:
-        integration = IntegrationAccount(
+    Translates Playwright's list-of-cookie-dicts into the unified payload and
+    routes through `persist_linkedin_session` so the DB shape matches the
+    extension and paste paths.
+    """
+    li_at = next((c["value"] for c in session_cookies if c.get("name") == "li_at"), None)
+    if not li_at:
+        logger.warning(f"Playwright login for {user_id} produced no li_at cookie")
+        return
+    jsessionid = next((c["value"] for c in session_cookies if c.get("name") == "JSESSIONID"), None)
+    try:
+        await persist_linkedin_session(
+            db=db,
             user_id=user_id,
-            platform=Platform.LINKEDIN,
-            session_cookies=encrypted_cookies,
+            li_at=li_at,
+            source="playwright",
+            jsessionid=jsessionid,
         )
-        db.add(integration)
-
-    await db.commit()
-    logger.info(f"Saved LinkedIn session cookies via login flow for user {user_id}")
+    except HTTPException as exc:
+        # Validation failed even though Playwright thought login succeeded.
+        # Log and swallow; the caller's response will say "error".
+        logger.warning(f"Playwright-acquired cookie failed validation for {user_id}: {exc.detail}")
