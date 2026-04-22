@@ -1,4 +1,4 @@
-# AutoEngage Setup Guide
+# B2B Pulse Setup Guide
 
 ## Quick Start (Local Development)
 
@@ -119,23 +119,28 @@ Default models (configurable):
 
 In a Railway project, create these services:
 
-| Railway Service    | Source           | Start Command |
-|--------------------|------------------|---------------|
-| **backend**        | `./backend` dir  | `alembic upgrade head && gunicorn app.main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000 --workers 4` |
-| **celery-worker**  | `./backend` dir  | `alembic upgrade head && celery -A app.workers.celery_app worker --loglevel=info --concurrency=4` |
-| **celery-beat**    | `./backend` dir  | `alembic upgrade head && celery -A app.workers.celery_app beat --loglevel=info` |
-| **frontend**       | `./frontend` dir | Uses `Dockerfile.prod` (nginx) |
-| **whatsapp-sidecar** | `./whatsapp-sidecar` dir | `node index.js` |
-| **PostgreSQL**     | Railway plugin   | Auto-managed |
-| **Redis**          | Railway plugin   | Auto-managed |
+| Railway Service      | Source / Root Dir        | Dockerfile       | Start Command |
+|----------------------|--------------------------|------------------|---------------|
+| **backend**          | `./backend`              | `Dockerfile.prod` | `alembic upgrade head && gunicorn app.main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --workers 4 --access-logfile - --error-logfile -` |
+| **celery-worker**    | `./backend`              | `Dockerfile.prod` | `celery -A app.workers.celery_app worker --loglevel=info --concurrency=4` |
+| **celery-beat**      | `./backend`              | `Dockerfile.prod` | `celery -A app.workers.celery_app beat --loglevel=info --schedule=/tmp/celerybeat-schedule --pidfile=/tmp/celerybeat.pid` |
+| **frontend**         | `./frontend`             | `Dockerfile.prod` | Uses container `CMD` (nginx binds to `$PORT`) |
+| **whatsapp-sidecar** | `./whatsapp-sidecar`     | `Dockerfile`      | `npx tsx src/index.ts` |
+| **PostgreSQL**       | Railway plugin           | —                 | Auto-managed |
+| **Redis**            | Railway plugin           | —                 | Auto-managed |
+
+> Only the **backend** service runs `alembic upgrade head` on boot. Running it in
+> celery-worker and celery-beat as well causes a migration race on deploy.
 
 ### Environment Variables
 
 Railway auto-injects `DATABASE_URL` and `REDIS_URL` for managed plugins.
 
-> **Important**: Railway injects `DATABASE_URL` with `postgresql://` scheme. Our app needs `postgresql+asyncpg://`. Either:
-> - Set `DATABASE_URL` manually with the `+asyncpg` driver prefix
-> - Or add a startup script that transforms it (see `scripts/deploy.sh`)
+> **Note**: Railway injects `DATABASE_URL` with the `postgresql://` scheme, but
+> SQLAlchemy's async engine needs `postgresql+asyncpg://`. The app transforms
+> this automatically in `app/config.py` (see the `database_url` validator), so
+> no manual prefix is required. The same transform flows into Alembic via
+> `alembic/env.py`, which reads from `app.config.settings`.
 
 All other env vars from `.env.example` must be set as Railway service variables (shared across backend, celery-worker, celery-beat).
 
@@ -154,10 +159,11 @@ All other env vars from `.env.example` must be set as Railway service variables 
 ### Dockerfile Selection
 
 For production deploys, use the `.prod` Dockerfiles:
-- Backend: `backend/Dockerfile.prod` — multi-stage build with gunicorn, Playwright + Chromium pre-installed
-- Frontend: `frontend/Dockerfile.prod` — builds static assets, serves via nginx
+- Backend: `backend/Dockerfile.prod` — multi-stage build with gunicorn, Playwright + Chromium pre-installed under `/opt/playwright-browsers` (readable by the non-root `appuser`), and `$PORT` honored in the CMD.
+- Frontend: `frontend/Dockerfile.prod` — builds static assets with `VITE_API_URL` baked in as a build arg, renders `nginx.conf.template` with `envsubst` so nginx listens on `$PORT`.
+- WhatsApp sidecar: `whatsapp-sidecar/Dockerfile` — single stage, installs Chromium system package, runs `npx tsx src/index.ts` (tsx is pulled in by `npm install` since it lives in `devDependencies`). Listens on `$PORT` (default `3001`).
 
-In Railway, set the Dockerfile path in each service's settings.
+Committed `railway.toml` files in `backend/` and `frontend/` pin the Dockerfile path and healthcheck. Worker / beat / sidecar services must have their Start Command set explicitly in the Railway UI (table above).
 
 ---
 

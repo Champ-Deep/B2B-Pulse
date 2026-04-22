@@ -281,28 +281,32 @@ See [.env.example](.env.example) for the full list with setup instructions.
 
 | Service | Source | Build | Start Command |
 |---------|--------|-------|---------------|
-| Backend | `backend/` | Dockerfile | `alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT` |
-| Celery Worker | `backend/` | Dockerfile | `celery -A app.workers.celery_app worker --loglevel=info --concurrency=4` |
-| Celery Beat | `backend/` | Dockerfile | `celery -A app.workers.celery_app beat --loglevel=info` |
-| Frontend | `frontend/` | Dockerfile.prod | nginx serves static build |
+| Backend | `backend/` | `Dockerfile.prod` | `alembic upgrade head && gunicorn app.main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --workers 4 --access-logfile - --error-logfile -` |
+| Celery Worker | `backend/` | `Dockerfile.prod` | `celery -A app.workers.celery_app worker --loglevel=info --concurrency=4` |
+| Celery Beat | `backend/` | `Dockerfile.prod` | `celery -A app.workers.celery_app beat --loglevel=info --schedule=/tmp/celerybeat-schedule --pidfile=/tmp/celerybeat.pid` |
+| Frontend | `frontend/` | `Dockerfile.prod` | Built-in CMD (nginx listens on `$PORT`) |
+| WhatsApp Sidecar | `whatsapp-sidecar/` | `Dockerfile` | `npx tsx src/index.ts` |
 | PostgreSQL | Railway plugin | — | — |
 | Redis | Railway plugin | — | — |
+
+> Only the **backend** service runs `alembic upgrade head`. Do not add it to the
+> worker or beat start commands — parallel migrations race on deploy.
 
 ### Railway Setup Steps
 
 1. Create a new Railway project
 2. Add **PostgreSQL** and **Redis** plugins
-3. Add services for Backend, Celery Worker, Celery Beat, Frontend
-4. Set root directory for each service (`backend/` or `frontend/`)
+3. Add services for Backend, Celery Worker, Celery Beat, Frontend, WhatsApp Sidecar
+4. Set each service's **Root Directory** to `backend/`, `frontend/`, or `whatsapp-sidecar/` (Railway then picks up the committed `railway.toml` where present)
 5. Configure shared environment variables across backend services:
-   - **Important:** Railway provides `DATABASE_URL` as `postgresql://...` — you must override it as `postgresql+asyncpg://...` for SQLAlchemy async
+   - Railway injects `DATABASE_URL` as `postgresql://...`. No manual rewrite is required — `app/config.py` converts it to `postgresql+asyncpg://` at load time (for both the API and Alembic).
    - Set `REDIS_URL` from the Redis plugin's connection string
    - Set all LinkedIn, JWT, Fernet, and OpenRouter variables
    - Set `CORS_ORIGINS` to your frontend Railway URL
    - Set `LINKEDIN_AUTH_REDIRECT_URI` to `https://<backend-domain>/api/auth/linkedin/callback`
    - Set `LINKEDIN_REDIRECT_URI` to `https://<backend-domain>/api/integrations/linkedin/callback`
 6. Set `APP_ENV=production` for all backend services
-7. Frontend needs `VITE_API_URL=https://<backend-domain>/api` as build arg
+7. Frontend needs `VITE_API_URL=https://<backend-domain>/api` as a build arg (Railway → Service → Variables → Build-time)
 
 ### First Super Admin
 

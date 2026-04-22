@@ -11,7 +11,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system deps for Playwright Chromium
+# Install system deps for Playwright Chromium + healthcheck
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget gnupg curl \
     && rm -rf /var/lib/apt/lists/*
@@ -22,22 +22,29 @@ RUN useradd -m -u 1000 appuser
 # Copy Python packages from builder
 COPY --from=builder /install /usr/local
 
-# Install Playwright browsers (needs to run as root for system deps)
-RUN playwright install chromium --with-deps
+# Install Playwright browsers to a world-readable path so appuser can launch them.
+# The default /root/.cache/ms-playwright would be unreadable after dropping root.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
+RUN mkdir -p "$PLAYWRIGHT_BROWSERS_PATH" \
+    && playwright install chromium --with-deps \
+    && chmod -R a+rX "$PLAYWRIGHT_BROWSERS_PATH"
 
 # Copy application code
 COPY --chown=appuser:appuser . .
 
 USER appuser
 
+# Railway injects $PORT; default to 8000 for local builds.
+ENV PORT=8000
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -fsS "http://localhost:${PORT}/health" || exit 1
 
-CMD ["gunicorn", "app.main:app", \
-     "-k", "uvicorn.workers.UvicornWorker", \
-     "--bind", "0.0.0.0:8000", \
-     "--workers", "4", \
-     "--access-logfile", "-", \
-     "--error-logfile", "-"]
+# Shell form so $PORT expands at runtime. exec keeps gunicorn as PID 1 for signals.
+CMD exec gunicorn app.main:app \
+    -k uvicorn.workers.UvicornWorker \
+    --bind "0.0.0.0:${PORT}" \
+    --workers 4 \
+    --access-logfile - \
+    --error-logfile -

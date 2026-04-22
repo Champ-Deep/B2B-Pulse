@@ -57,3 +57,8 @@ nginx/ssl/*.key
 
 # Alembic
 backend/alembic/versions/__pycache__/
+
+# Celery Beat schedule state (written at runtime, must not be committed)
+backend/celerybeat-schedule
+backend/celerybeat-schedule.*
+celerybeat.pid

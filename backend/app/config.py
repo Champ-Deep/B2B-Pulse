@@ -1,3 +1,4 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,6 +16,17 @@ class Settings(BaseSettings):
 
     # Database
     database_url: str
+
+    @field_validator("database_url")
+    @classmethod
+    def _ensure_asyncpg_driver(cls, value: str) -> str:
+        # Railway/Render inject DATABASE_URL as postgresql:// or postgres://
+        # SQLAlchemy async requires postgresql+asyncpg://.
+        if value.startswith("postgres://"):
+            return "postgresql+asyncpg://" + value[len("postgres://") :]
+        if value.startswith("postgresql://"):
+            return "postgresql+asyncpg://" + value[len("postgresql://") :]
+        return value
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"
@@ -43,7 +55,7 @@ class Settings(BaseSettings):
     r2_account_id: str = ""
     r2_access_key_id: str = ""
     r2_secret_access_key: str = ""
-    r2_bucket_name: str = "autoengage-assets"
+    r2_bucket_name: str = "b2bpulse-assets"
     r2_endpoint_url: str = ""
 
     # Meta (Facebook/Instagram) OAuth
