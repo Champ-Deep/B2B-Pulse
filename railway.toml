@@ -1,0 +1,15 @@
+# Root railway.toml — used when no Root Directory is set on the Railway service.
+# This configures the backend (web) service.
+# Celery worker, beat, and the frontend are separate Railway services;
+# see docs/SETUP.md for their start commands and root directory settings.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "alembic upgrade head && gunicorn app.main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --workers 4 --access-logfile - --error-logfile -"
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
