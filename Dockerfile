@@ -40,6 +40,11 @@ RUN mkdir -p "$PLAYWRIGHT_BROWSERS_PATH" \
 #   /app/pyproject.toml
 COPY --chown=appuser:appuser backend/ .
 
+# Copy the Railway startup script (pre-flight env checks + alembic + gunicorn).
+# Installed as root before dropping to appuser so chmod +x works.
+COPY scripts/railway-start.sh /usr/local/bin/railway-start
+RUN chmod +x /usr/local/bin/railway-start
+
 USER appuser
 
 # Railway injects $PORT at runtime; fall back to 8000 for local builds.
@@ -49,11 +54,4 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -fsS "http://localhost:${PORT}/health" || exit 1
 
-# Shell form so ${PORT} is expanded by the shell at container start.
-# exec replaces the shell so gunicorn is PID 1 and receives signals directly.
-CMD exec gunicorn app.main:app \
-    -k uvicorn.workers.UvicornWorker \
-    --bind "0.0.0.0:${PORT}" \
-    --workers 4 \
-    --access-logfile - \
-    --error-logfile -
+CMD ["railway-start"]
