@@ -1,3 +1,4 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,8 +18,17 @@ class Settings(BaseSettings):
     # to know where to POST cookies). Defaults to the local dev port.
     api_base_url: str = "http://localhost:8001"
 
-    # Database
+    # Database — Railway injects postgresql://, asyncpg requires postgresql+asyncpg://
     database_url: str
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def rewrite_postgres_scheme(cls, v: str) -> str:
+        if v.startswith("postgres://"):
+            return v.replace("postgres://", "postgresql+asyncpg://", 1)
+        if v.startswith("postgresql://"):
+            return v.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return v
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"
