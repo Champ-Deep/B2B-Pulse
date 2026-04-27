@@ -344,16 +344,51 @@ async def scrape_profile_posts(profile_url: str, cookies: list[dict] | None = No
             )
             return []
 
-        for _ in range(3):
-            await page.evaluate("window.scrollBy(0, 800)")
-            await asyncio.sleep(1)
+        # Scroll to load more posts
+        for _ in range(5):
+            await page.evaluate("window.scrollBy(0, 1000)")
+            await asyncio.sleep(1.5)
 
+        # LinkedIn 2024/2025 DOM — try multiple selector strategies in order
         post_elements = await page.query_selector_all(
+            # Current LinkedIn activity feed containers
             'div[data-urn*="activity"], '
-            "li.profile-creator-shared-feed-update__container, "
+            'li[class*="profile-creator-shared-feed-update"], '
+            # Older selectors as fallback
             "div.feed-shared-update-v2, "
-            "div.occludable-update"
+            "div.occludable-update, "
+            # Recent activity page specific
+            'div[class*="update-components-actor"], '
+            'div[class*="feed-shared-update"]'
         )
+
+        # Fallback: grab all post links directly if container selectors fail
+        if not post_elements:
+            post_links = await page.query_selector_all('a[href*="/feed/update/"]')
+            logger.info(f"Fallback: found {len(post_links)} post links on {profile_url}")
+            for link in post_links[:10]:
+                try:
+                    post_href = await link.get_attribute("href")
+                    if not post_href:
+                        continue
+                    # Walk up to find text content
+                    parent = await link.evaluate_handle("el => el.closest('div[data-urn]') || el.parentElement")
+                    text = ""
+                    try:
+                        text = await parent.inner_text()
+                        text = text[:2000]
+                    except Exception:
+                        pass
+                    external_id = post_href
+                    posts.append({
+                        "external_id": external_id,
+                        "url": f"https://www.linkedin.com{post_href}" if post_href.startswith("/") else post_href,
+                        "content": text,
+                    })
+                except Exception as e:
+                    logger.debug(f"Error extracting post link: {e}")
+            return posts
+
         logger.info(f"Found {len(post_elements)} post elements on {profile_url}")
 
         for element in post_elements[:10]:
@@ -364,7 +399,8 @@ async def scrape_profile_posts(profile_url: str, cookies: list[dict] | None = No
                     ".feed-shared-update-v2__description, "
                     ".update-components-text, "
                     'span[dir="ltr"], '
-                    ".attributed-text-segment-list__content"
+                    ".attributed-text-segment-list__content, "
+                    'div[class*="update-components-text"]'
                 )
                 text = await text_el.inner_text() if text_el else ""
                 data_urn = await element.get_attribute("data-urn")
