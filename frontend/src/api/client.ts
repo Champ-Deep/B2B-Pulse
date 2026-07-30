@@ -10,38 +10,45 @@ const api = axios.create({
   },
 })
 
-// Attach JWT token to every request
-api.interceptors.request.use((config) => {
-  const token = localStorage.getItem('access_token')
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`
+// Clerk owns the session token and its refresh. The provider registers a
+// getter here rather than us reading localStorage: Clerk rotates tokens on a
+// short cycle, so a cached copy goes stale, and asking for it per request is
+// the only way to be sure what we attach is still valid.
+//
+// This also removes the refresh-on-401 dance the old locally-issued JWT
+// needed — there is nothing left for us to refresh.
+type TokenGetter = () => Promise<string | null>
+
+let getToken: TokenGetter | null = null
+
+export function setAuthTokenGetter(getter: TokenGetter | null): void {
+  getToken = getter
+}
+
+api.interceptors.request.use(async (config) => {
+  if (getToken) {
+    try {
+      const token = await getToken()
+      if (token) {
+        config.headers.Authorization = `Bearer ${token}`
+      }
+    } catch {
+      // No token available — let the request go out unauthenticated and let
+      // the response interceptor handle the 401.
+    }
   }
   return config
 })
 
-// Handle 401 responses — attempt token refresh
 api.interceptors.response.use(
   (response) => response,
-  async (error) => {
-    const originalRequest = error.config
-    if (error.response?.status === 401 && !originalRequest._retry) {
-      originalRequest._retry = true
-      const refreshToken = localStorage.getItem('refresh_token')
-      if (refreshToken) {
-        try {
-          const { data } = await axios.post(`${API_URL}/auth/refresh`, {
-            refresh_token: refreshToken,
-          })
-          localStorage.setItem('access_token', data.access_token)
-          localStorage.setItem('refresh_token', data.refresh_token)
-          originalRequest.headers.Authorization = `Bearer ${data.access_token}`
-          return api(originalRequest)
-        } catch {
-          localStorage.removeItem('access_token')
-          localStorage.removeItem('refresh_token')
-          window.location.href = '/login'
-        }
-      } else {
+  (error) => {
+    // A 401 now means "not signed in", not "token needs refreshing" — Clerk
+    // has already tried to refresh before handing us anything. Send the user
+    // to sign in rather than retrying a request that cannot succeed.
+    if (error.response?.status === 401) {
+      const path = window.location.pathname
+      if (path !== '/login' && path !== '/sign-in') {
         window.location.href = '/login'
       }
     }

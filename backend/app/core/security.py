@@ -1,3 +1,12 @@
+"""
+Cryptographic helpers.
+
+Session tokens are no longer issued here — Clerk owns identity, and this
+service only verifies the tokens it is handed (see ``app/core/clerk.py``). What
+remains is credential encryption and the short-lived signed values used for
+OAuth state during integration connect.
+"""
+
 from datetime import UTC, datetime, timedelta
 
 from cryptography.fernet import Fernet
@@ -7,25 +16,24 @@ from app.config import settings
 
 fernet = Fernet(settings.fernet_key.encode() if settings.fernet_key else Fernet.generate_key())
 
+# OAuth state is a round-trip through the browser and back within a minute or
+# two; anything longer is a replay.
+OAUTH_STATE_TTL_MINUTES = 10
 
-def create_access_token(data: dict) -> str:
+
+def sign_state(data: dict, ttl_minutes: int = OAUTH_STATE_TTL_MINUTES) -> str:
+    """Sign a short-lived payload for an OAuth round trip."""
     to_encode = data.copy()
-    expire = datetime.now(UTC) + timedelta(minutes=settings.access_token_expire_minutes)
-    to_encode.update({"exp": expire, "type": "access"})
-    return jwt.encode(to_encode, settings.jwt_secret, algorithm=settings.jwt_algorithm)
-
-
-def create_refresh_token(data: dict) -> str:
-    to_encode = data.copy()
-    expire = datetime.now(UTC) + timedelta(days=settings.refresh_token_expire_days)
-    to_encode.update({"exp": expire, "type": "refresh"})
+    to_encode.update(
+        {"exp": datetime.now(UTC) + timedelta(minutes=ttl_minutes), "type": "state"}
+    )
     return jwt.encode(to_encode, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 
 def decode_token(token: str) -> dict | None:
+    """Decode a value this service signed. Returns None if invalid or expired."""
     try:
-        payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
-        return payload
+        return jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
     except JWTError:
         return None
 

@@ -1,53 +1,41 @@
+"""
+Request dependencies.
+
+Authentication moved from a locally-issued JWT (LinkedIn OAuth login) to Clerk.
+``get_current_user`` keeps its exact signature and return type through that
+change, so every existing route continues to work untouched — only the way the
+``User`` is arrived at differs. Routes that need the org explicitly can depend
+on ``get_request_context`` or ``get_current_org_id`` instead.
+"""
+
 import uuid
 
 from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import decode_token
-from app.database import get_db
+from app.core.clerk import RequestContext, get_request_context
 from app.models.user import User, UserRole
 
-security_scheme = HTTPBearer()
+__all__ = [
+    "get_current_user",
+    "get_current_org_id",
+    "get_request_context",
+    "require_role",
+    "require_platform_admin",
+]
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security_scheme),
-    db: AsyncSession = Depends(get_db),
+    ctx: RequestContext = Depends(get_request_context),
 ) -> User:
-    token = credentials.credentials
-    payload = decode_token(token)
+    """The authenticated user, provisioned from Clerk claims on first sight."""
+    return ctx.user
 
-    if payload is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
-        )
 
-    if payload.get("type") != "access":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token type",
-        )
-
-    user_id = payload.get("sub")
-    if user_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token payload",
-        )
-
-    result = await db.execute(select(User).where(User.id == uuid.UUID(user_id)))
-    user = result.scalar_one_or_none()
-
-    if user is None or not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found or inactive",
-        )
-
-    return user
+async def get_current_org_id(
+    ctx: RequestContext = Depends(get_request_context),
+) -> uuid.UUID:
+    """The org every query in this request should be scoped to."""
+    return ctx.org_id
 
 
 def require_role(*roles: UserRole):

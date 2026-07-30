@@ -1,7 +1,9 @@
-"""Test fixtures for AutoEngage backend tests."""
+"""Test fixtures for B2B Pulse backend tests."""
 
 import asyncio
+import json
 import os
+import time
 import uuid
 
 import pytest
@@ -81,18 +83,88 @@ async def client(db: AsyncSession) -> AsyncClient:
     app.dependency_overrides.clear()
 
 
+# ---------------------------------------------------------------------------
+# Clerk auth
+#
+# Tests mint real RS256 tokens and verify them against an injected JWKS, so the
+# full signature-verification path runs -- no network, no Clerk account, and no
+# "skip verification" shortcut that would let a broken verifier pass tests.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def clerk_keypair():
+    """An RSA keypair plus the JWKS that describes its public half."""
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from jwt.algorithms import RSAAlgorithm
+
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    jwk = json.loads(RSAAlgorithm.to_jwk(private_key.public_key()))
+    jwk["kid"] = "test-key"
+    return private_key, {"keys": [jwk]}
+
+
+@pytest.fixture(autouse=True)
+def clerk_verifier(clerk_keypair):
+    """Point the app's verifier at the test JWKS for the duration of a test."""
+    from app.core.clerk import ClerkConfig, ClerkVerifier, set_verifier
+
+    _, jwks = clerk_keypair
+    set_verifier(ClerkVerifier(ClerkConfig(), jwks=jwks))
+    yield
+    set_verifier(None)
+
+
 @pytest.fixture
-async def auth_headers(client: AsyncClient) -> dict:
-    """Sign up a test user and return auth headers."""
-    response = await client.post(
-        "/api/auth/signup",
-        json={
+def clerk_token(clerk_keypair):
+    """Mint a Clerk-shaped session token."""
+    import jwt as pyjwt
+
+    private_key, _ = clerk_keypair
+
+    def _mint(**claims) -> str:
+        payload = {
+            "sub": f"user_{uuid.uuid4().hex[:12]}",
             "email": f"test-{uuid.uuid4().hex[:8]}@example.com",
-            "password": "testpassword123",
-            "full_name": "Test User",
-            "org_name": "Test Org",
-        },
-    )
-    assert response.status_code == 201
-    token = response.json()["access_token"]
-    return {"Authorization": f"Bearer {token}"}
+            "name": "Test User",
+            "exp": int(time.time()) + 3600,
+        }
+        payload.update(claims)
+        return pyjwt.encode(
+            payload, private_key, algorithm="RS256", headers={"kid": "test-key"}
+        )
+
+    return _mint
+
+
+@pytest.fixture
+async def auth_headers(client: AsyncClient, clerk_token) -> dict:
+    """
+    Headers for an authenticated user.
+
+    Calling /api/auth/me is what provisions the local User and Org, so this
+    also exercises the just-in-time provisioning path every real client hits.
+    """
+    headers = {"Authorization": f"Bearer {clerk_token()}"}
+    response = await client.get("/api/auth/me", headers=headers)
+    assert response.status_code == 200, response.text
+    return headers
+
+
+@pytest.fixture
+async def admin_headers(client: AsyncClient, clerk_token, db) -> dict:
+    """An authenticated user promoted to platform admin."""
+    from sqlalchemy import select
+
+    from app.models.user import User
+
+    headers = {"Authorization": f"Bearer {clerk_token()}"}
+    response = await client.get("/api/auth/me", headers=headers)
+    assert response.status_code == 200, response.text
+
+    user = (
+        await db.execute(select(User).where(User.id == uuid.UUID(response.json()["id"])))
+    ).scalar_one()
+    user.is_platform_admin = True
+    await db.commit()
+    return headers

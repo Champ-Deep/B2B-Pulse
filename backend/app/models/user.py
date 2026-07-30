@@ -25,9 +25,12 @@ class User(Base):
         UUID(as_uuid=True), ForeignKey("orgs.id"), nullable=False
     )
     email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False, index=True)
-    hashed_password: Mapped[str | None] = mapped_column(String(255), nullable=True)
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     linkedin_id: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True, index=True)
+    # Clerk is the identity provider; this is the join key to the token's `sub`.
+    clerk_user_id: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, unique=True, index=True
+    )
     role: Mapped[UserRole] = mapped_column(
         Enum(UserRole, values_callable=lambda x: [e.value for e in x]),
         nullable=False,

@@ -19,11 +19,18 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 
-    # JWT
+    # Clerk (identity provider). The backend only verifies tokens; Clerk issues
+    # and refreshes them on the client.
+    clerk_jwks_url: str = ""
+    clerk_issuer: str = ""
+    clerk_audience: str = ""
+    # Local dev ONLY: accept unsigned tokens. Never set this in production.
+    clerk_dev_unsafe: bool = False
+
+    # JWT settings retained only for legacy signed values (OAuth state); no
+    # session token is issued by this service any more.
     jwt_secret: str
     jwt_algorithm: str = "HS256"
-    access_token_expire_minutes: int = 30
-    refresh_token_expire_days: int = 7
 
     # Encryption
     fernet_key: str

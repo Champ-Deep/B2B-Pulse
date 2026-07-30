@@ -57,3 +57,5 @@ nginx/ssl/*.key
 
 # Alembic
 backend/alembic/versions/__pycache__/
+backend/.venv/
+test.db

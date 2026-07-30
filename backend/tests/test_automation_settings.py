@@ -104,5 +104,13 @@ async def test_settings_polling_interval_too_low(client: AsyncClient, auth_heade
 
 @pytest.mark.asyncio
 async def test_settings_requires_auth(client: AsyncClient):
+    """
+    401, not 403.
+
+    FastAPI's HTTPBearer returned 403 for a missing header, which is wrong:
+    403 means "authenticated but not allowed". Clerk verification returns 401
+    with a WWW-Authenticate challenge, which is what a client needs in order to
+    know it should go and sign in.
+    """
     response = await client.get("/api/automation/settings")
-    assert response.status_code == 403
+    assert response.status_code == 401
