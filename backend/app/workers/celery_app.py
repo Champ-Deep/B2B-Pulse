@@ -11,6 +11,7 @@ celery_app = Celery(
         "app.workers.engagement_tasks",
         "app.workers.session_monitor",
         "app.workers.stale_actions",
+        "app.workers.warmup_tasks",
     ],
 )
 
@@ -35,6 +36,20 @@ celery_app.conf.update(
         "cleanup-stale-actions": {
             "task": "app.workers.stale_actions.cleanup_stale_actions",
             "schedule": 600.0,  # Every 10 minutes
+        },
+        # Warm-up. The planner has already scattered each account's actions
+        # across the day, so a frequent tick means an account acts close to the
+        # minute it was scheduled to rather than in a clump on the hour -- it
+        # does not mean more activity.
+        "run-warmup-activity": {
+            "task": "app.workers.warmup_tasks.run_warmup_activity",
+            "schedule": 1200.0,  # Every 20 minutes
+        },
+        # Stage changes are a once-a-day decision; running it more often is the
+        # same answer for twenty times the work.
+        "evaluate-warmup-stages": {
+            "task": "app.workers.warmup_tasks.evaluate_warmup_stages",
+            "schedule": 86400.0,  # Daily
         },
     },
 )

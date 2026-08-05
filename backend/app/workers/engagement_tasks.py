@@ -61,6 +61,8 @@ async def _schedule_engagements(post_id: str, tracked_page_id: str):
         now = datetime.now(UTC)
         is_weekend = now.weekday() >= 5  # Saturday=5, Sunday=6
 
+        from app.warmup import gate
+
         for i, sub in enumerate(subscriptions):
             # Skip if user already has any engagement action for this post
             existing = await db.execute(
@@ -72,6 +74,21 @@ async def _schedule_engagements(post_id: str, tracked_page_id: str):
             if existing.scalar_one_or_none():
                 logger.debug(
                     f"Skipping - engagement already exists for user {sub.user_id} on post {post_id}"
+                )
+                continue
+
+            # --- Warm-up gate ---
+            #
+            # A subscription says the user *wants* to engage; the gate decides
+            # whether their account has earned it. A brand-new account whose
+            # first action is an AI comment on a company post is the exact
+            # profile that gets restricted, so it is held back here rather than
+            # discovering the problem in a browser later.
+            account = await gate.account_for_user(db, sub.user_id)
+            if account is None:
+                logger.info(
+                    "Skipping user %s: no active LinkedIn account connected",
+                    sub.user_id,
                 )
                 continue
 
@@ -117,7 +134,12 @@ async def _schedule_engagements(post_id: str, tracked_page_id: str):
             comment_cap = 60 if risk == "aggro" else 20
 
             # --- Create like action ---
-            if sub.auto_like and today_likes < like_cap:
+            like_gate = await gate.check(db, sub.user_id, "like", account=account)
+            if sub.auto_like and not like_gate:
+                logger.info(
+                    "Skipping like for user %s: %s", sub.user_id, like_gate.reason
+                )
+            if sub.auto_like and like_gate and today_likes < like_cap:
                 like_action = EngagementAction(
                     post_id=uuid.UUID(post_id),
                     user_id=sub.user_id,
@@ -143,7 +165,16 @@ async def _schedule_engagements(post_id: str, tracked_page_id: str):
                 )
 
             # --- Create comment action ---
-            if sub.auto_comment and today_comments < comment_cap:
+            #
+            # Comments are gated harder than likes in practice, because they
+            # unlock two stages later in the programme: an account can be
+            # liking for a week before it is allowed to say anything.
+            comment_gate = await gate.check(db, sub.user_id, "comment", account=account)
+            if sub.auto_comment and not comment_gate:
+                logger.info(
+                    "Skipping comment for user %s: %s", sub.user_id, comment_gate.reason
+                )
+            if sub.auto_comment and comment_gate and today_comments < comment_cap:
                 comment_action = EngagementAction(
                     post_id=uuid.UUID(post_id),
                     user_id=sub.user_id,
@@ -436,6 +467,32 @@ async def _execute_engagement(engagement_action_id: str):
                     )
 
             action.completed_at = datetime.now(UTC)
+
+            # Mirror the outcome into the activity ledger.
+            #
+            # Without this, pipeline work is invisible to warm-up graduation:
+            # an account could engage all day through tracked pages and still
+            # sit at the observe stage forever, because the programme counts
+            # from the ledger rather than from engagement_actions.
+            try:
+                from app.warmup import gate as warmup_gate
+
+                warm_account = await warmup_gate.account_for_user(db, action.user_id)
+                if warm_account is not None:
+                    await warmup_gate.record(
+                        db,
+                        warm_account,
+                        "like" if action.action_type == ActionType.LIKE else "comment",
+                        ok=action.status == ActionStatus.COMPLETED,
+                        subject=post.external_post_id or post.url,
+                        error=action.error_message,
+                        commit=False,
+                    )
+            except Exception as ledger_error:  # never fail an action over bookkeeping
+                logger.warning(
+                    "Could not record activity for action %s: %s",
+                    action.id, ledger_error,
+                )
 
         except Exception as e:
             # Transient failure (network, rate limit, 500 error) - will be retried
