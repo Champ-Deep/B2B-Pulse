@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.models.post import Post
 from app.models.tracked_page import TrackedPage
+from app.workers.engagement_tasks import schedule_staggered_engagements
 from app.services.url_utils import (
     extract_facebook_post_id,
     extract_instagram_post_id,
@@ -123,9 +124,11 @@ async def handle_whatsapp_link(
 
         logger.info(f"New post from WhatsApp: {event.url} -> post {post.id}")
 
-        # Enqueue engagement jobs via Celery
-        from app.workers.engagement_tasks import schedule_staggered_engagements
-
+        # Enqueue engagement jobs via Celery.
+        #
+        # Imported at module scope (below) rather than here so the name exists
+        # on this module and can be patched in tests — a deferred import is
+        # invisible to mock.patch, which is why the webhook tests were failing.
         schedule_staggered_engagements.delay(str(post.id), str(matched_page.id))
 
         return {

@@ -61,9 +61,42 @@ async def _schedule_engagements(post_id: str, tracked_page_id: str):
         now = datetime.now(UTC)
         is_weekend = now.weekday() >= 5  # Saturday=5, Sunday=6
 
+        from app.safety import cluster
         from app.warmup import gate
 
+        # --- Cluster sampling ---
+        #
+        # Decide *before* creating any work which accounts engage with this
+        # post. Five colleagues liking and commenting on the same post, from
+        # the same model, in the same hours, is a coordinated-inauthenticity
+        # pattern — and detection catches the cluster, not the account, so all
+        # five would go at once.
+        #
+        # This runs here rather than after approval on purpose: with bulk
+        # approval an admin clicks once, so the sampling has to already have
+        # happened. They approve "these three accounts engage", never "all
+        # five do".
+        participation = await cluster.eligible_participants(
+            db,
+            uuid.UUID(post_id),
+            uuid.UUID(tracked_page_id),
+            [str(s.user_id) for s in subscriptions],
+        )
+        if participation.skipped:
+            logger.info(
+                "Cluster sampling for post %s: %s (skipped %d)",
+                post_id, participation.reason, len(participation.skipped),
+            )
+
         for i, sub in enumerate(subscriptions):
+            if not participation.includes(sub.user_id):
+                logger.debug(
+                    "Post %s: user %s not sampled — %s",
+                    post_id, sub.user_id,
+                    participation.skipped.get(str(sub.user_id), "not selected"),
+                )
+                continue
+
             # Skip if user already has any engagement action for this post
             existing = await db.execute(
                 select(EngagementAction).where(
@@ -439,9 +472,37 @@ async def _execute_engagement(engagement_action_id: str):
                 custom_phrases = [p.phrase for p in org_phrases_result.scalars().all()]
                 all_avoid = list(DEFAULT_AVOID_PHRASES) + custom_phrases if custom_phrases else None
 
+                # --- Persona ---
+                #
+                # The account's resolved persona (org direction + this person's
+                # own voice) is prepended to the profile text. This is what
+                # stops five colleagues producing five near-identical comments
+                # on the same post -- which is exactly the correlation signal
+                # safety/cluster.py measures. Each account generates from a
+                # genuinely different voice and angle, not one prompt with a
+                # different name on it.
+                persona_prompt = ""
+                try:
+                    from app.personas import service as personas
+                    from app.warmup import gate as warmup_gate
+
+                    warm_account = await warmup_gate.account_for_user(db, action.user_id)
+                    resolved = await personas.resolve(
+                        db, user.org_id, warm_account.id if warm_account else None
+                    )
+                    persona_prompt = personas.to_prompt(resolved)
+                except Exception as persona_error:
+                    # A missing persona must not stop a comment; it just makes
+                    # it less distinctive.
+                    logger.debug("No persona resolved for %s: %s", action.user_id, persona_error)
+
+                profile_text = profile.markdown_text if profile else ""
+                if persona_prompt:
+                    profile_text = f"{persona_prompt}\n\n{profile_text}".strip()
+
                 comment_result = await generate_and_review_comment(
                     post_content=post.content_text or "",
-                    user_profile=profile.markdown_text if profile else "",
+                    user_profile=profile_text,
                     tone_settings=profile.tone_settings if profile else None,
                     avoid_phrases=all_avoid,
                     platform=comment_platform,

@@ -9,6 +9,7 @@ from app.api.org import router as org_router
 from app.api.teams import router as teams_router
 from app.api.tracked_pages import router as tracked_pages_router
 from app.api.users import router as users_router
+from app.api.console import router as console_router
 from app.api.warmup import router as warmup_router
 from app.api.webhooks import router as webhooks_router
 
@@ -25,3 +26,4 @@ api_router.include_router(org_router)
 api_router.include_router(teams_router)
 api_router.include_router(admin_router)
 api_router.include_router(warmup_router)
+api_router.include_router(console_router)

@@ -6,6 +6,8 @@ from app.models.post import Post
 from app.models.team import Team
 from app.models.tracked_page import TrackedPage, TrackedPageSubscription
 from app.models.user import User, UserProfile
+from app.outbound.models import ICPProfile, OutreachSuggestion, OutreachTarget
+from app.personas.models import Persona
 from app.warmup.models import AccountActivity
 
 __all__ = [
@@ -14,6 +16,7 @@ __all__ = [
     "User",
     "UserProfile",
     "AccountActivity",
+    "Persona",
     "IntegrationAccount",
     "TrackedPage",
     "TrackedPageSubscription",
