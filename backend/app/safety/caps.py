@@ -83,6 +83,61 @@ TIERS = {
 
 DEFAULT_TIER = "warmup"
 
+# ---------------------------------------------------------------------------
+# The platform ceiling
+# ---------------------------------------------------------------------------
+#
+# Everything above is *our* policy. This is LinkedIn's, and nothing we
+# configure may exceed it — not a tier, not a per-account override, not an
+# operator who types a bigger number into the settings blob.
+#
+# A thirty-day behaviour simulation caught the aggressive tier reaching 106
+# invitations in a rolling week. That tier was written to approach the
+# vendor-quoted ~800/month (~185/week), on the theory that an aged high-SSI
+# account can carry it. The research does not support treating that as a risk
+# dial: ~100 per rolling week is where accounts get restricted, it is identical
+# for Free, Premium and Sales Navigator, and roughly a quarter of restricted
+# accounts were inside the published limits anyway. A setting that reliably
+# ends in a restriction is not an aggressive option, it is a broken one.
+#
+# So "aggressive" now means "as fast as the platform permits" rather than
+# "faster than the platform permits". The same clamp guards a mistyped override
+# — the failure mode where somebody sets per_day to 300 and finds out a week
+# later.
+PLATFORM_MAX = {
+    "connect": ActionCaps(per_hour=10, per_day=30, per_week=95, cooldown_seconds=0),
+    "message": ActionCaps(per_hour=15, per_day=70, per_week=0, cooldown_seconds=0),
+    "comment": ActionCaps(per_hour=10, per_day=30, per_week=0, cooldown_seconds=0),
+    "like": ActionCaps(per_hour=25, per_day=100, per_week=0, cooldown_seconds=0),
+    "follow": ActionCaps(per_hour=15, per_day=50, per_week=0, cooldown_seconds=0),
+    "post": ActionCaps(per_hour=2, per_day=3, per_week=0, cooldown_seconds=0),
+}
+
+
+def _clamp_to_platform(action: str, caps: "ActionCaps") -> "ActionCaps":
+    """Take the stricter of our policy and LinkedIn's own limit."""
+    ceiling = PLATFORM_MAX.get(action)
+    if ceiling is None:
+        return caps
+
+    def lower(ours: int, theirs: int) -> int:
+        # 0 means "no limit modelled on this side", so it never wins.
+        if not ours:
+            return theirs
+        if not theirs:
+            return ours
+        return min(ours, theirs)
+
+    return ActionCaps(
+        per_hour=lower(caps.per_hour, ceiling.per_hour),
+        per_day=lower(caps.per_day, ceiling.per_day),
+        per_week=lower(caps.per_week, ceiling.per_week),
+        # Cooldown is a floor rather than a ceiling — a longer gap is always
+        # safer — so the platform table does not override it.
+        cooldown_seconds=caps.cooldown_seconds,
+    )
+
+
 # Actions without a tier entry fall back to these.
 _FALLBACK = {
     "follow": ActionCaps(per_hour=10, per_day=40, cooldown_seconds=60),
@@ -181,7 +236,11 @@ def caps_for(account, action: str, *, throttle: float = 1.0) -> ActionCaps:
             # look calmer, not just do less in the same bursts.
             cooldown_seconds=int(base.cooldown_seconds / max(throttle, 0.1)),
         )
-    return base
+
+    # Last, and unconditionally: nothing we compute may exceed the platform's
+    # own limit. Applied after the override and the throttle so no path around
+    # it exists.
+    return _clamp_to_platform(action, base)
 
 
 def suggestion_budget(account) -> int:

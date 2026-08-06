@@ -133,7 +133,7 @@ def plan_day(
 
     stage = program.stage_for(stage_key or current_stage(account))
     rng = _seeded(account_id, day)
-    start_hour, end_hour = caps_policy.active_hours(account)
+    start_hour, end_hour = _working_window(account, account_id)
 
     plan = DailyPlan(
         account_id=account_id,
@@ -152,21 +152,27 @@ def plan_day(
             f"Throttled to {throttle:.0%} of normal volume by account health"
         )
 
+    if _is_day_off(account_id, day):
+        plan.notes.append(
+            "A day off — nobody engages every single day for a month"
+        )
+        return plan
+
     for action in sorted(stage.allowed):
         band = stage.volumes.get(action)
         if band is None:
             continue
 
-        count = _sample(band, rng)
+        count = _daily_count(account, action, band, day, throttle=throttle)
         if count == 0:
             continue
 
-        # Never exceed the account's hard cap for the action, and apply the
-        # weekend and health factors on top.
-        caps = caps_policy.caps_for(account, action, throttle=throttle)
-        ceiling = max(0, int(caps.per_day * weekend_factor * throttle))
-        count = min(count, ceiling) if ceiling else 0
+        # And never exceed what is left in the rolling week.
+        count = min(count, _weekly_headroom(account, action, stage, day, throttle))
         if count == 0:
+            plan.notes.append(
+                f"No {action} today — the rolling weekly allowance is spent"
+            )
             continue
 
         for at in _scatter(count, start_hour, end_hour, day, rng):
@@ -179,6 +185,107 @@ def plan_day(
     if not plan.actions:
         plan.notes.append("A deliberately quiet day — real accounts have them")
     return plan
+
+
+# Roughly one working day in nine is skipped entirely. Real people are ill,
+# travelling, in back-to-back meetings, or simply don't open LinkedIn — and an
+# account that engages every single day for a month is a machine signature
+# independent of how modest its daily volume is.
+#
+# A thirty-day simulation caught exactly that: the observe stage had a quiet-day
+# probability, but every stage after it fired every day, so a graduating account
+# went from "sometimes quiet" to "never misses" the moment it started doing
+# anything interesting.
+DAY_OFF_PROBABILITY = 0.11
+
+
+def _is_day_off(account_id: str, day: date) -> bool:
+    """
+    Is this account simply not around today?
+
+    Seeded separately from the volume RNG so adding or removing an action band
+    can't shift which days are off, and so two accounts' days off are
+    uncorrelated — five colleagues taking the same Thursday off would be its
+    own cluster signal.
+    """
+    digest = hashlib.sha256(f"{account_id}:dayoff:{day.isoformat()}".encode()).hexdigest()
+    return (int(digest[:8], 16) % 1000) < DAY_OFF_PROBABILITY * 1000
+
+
+def _daily_count(account, action: str, band, day: date, *, throttle: float) -> int:
+    """
+    How many of ``action`` this account does on ``day``, before weekly limits.
+
+    Factored out of :func:`plan_day` so :func:`_weekly_headroom` can replay a
+    day without recursing into the full planner — and, more importantly, so the
+    replay cannot drift from the real thing.
+    """
+    if _is_day_off(str(getattr(account, "id", "unknown")), day):
+        return 0
+
+    rng = _seeded(str(getattr(account, "id", "unknown")), day)
+    count = _sample(band, rng)
+    if count == 0:
+        return 0
+
+    weekend_factor = caps_policy.WEEKEND_MULTIPLIER if day.weekday() >= 5 else 1.0
+    caps = caps_policy.caps_for(account, action, throttle=throttle)
+    ceiling = max(0, int(caps.per_day * weekend_factor * throttle))
+    return min(count, ceiling) if ceiling else 0
+
+
+def _weekly_headroom(account, action: str, stage, day: date, throttle: float) -> int:
+    """
+    What is left of the rolling weekly allowance, after the previous six days.
+
+    The planner used to reason only in days. That is not how LinkedIn counts
+    invitations — the limit is a rolling week — so a tier permitting 30 a day
+    could plan five working days and land at 101, over the threshold where
+    accounts get restricted. The limiter would have refused the overflow, but
+    silently: the plan would look fine, the day's work would quietly evaporate,
+    and nobody would learn why.
+
+    Replays the previous six days' volumes rather than reading the ledger,
+    because the planner is deterministic and must stay callable without a
+    database (the console previews plans, and tests plan without persisting).
+    """
+    caps = caps_policy.caps_for(account, action, throttle=throttle)
+    if not caps.per_week:
+        return 10**6  # no weekly limit modelled for this action
+
+    band = stage.volumes.get(action)
+    if band is None:
+        return 0
+
+    spent = sum(
+        _daily_count(account, action, band, day - timedelta(days=back), throttle=throttle)
+        for back in range(1, 7)
+    )
+    return max(0, caps.per_week - spent)
+
+
+def _working_window(account, account_id: str) -> tuple:
+    """
+    The hours this account is active.
+
+    An explicit per-account ``active_hours`` setting wins — an operator who has
+    told us when this person works knows better than a hash. Otherwise the
+    window comes from ``safety.cluster``, which derives a distinct one per
+    account so a team's activity smears across the day instead of pulsing
+    together.
+
+    Before this, every account fell back to the same 8-19 default: the cluster
+    module computed per-account windows, the console displayed them, and the
+    planner ignored them. A simulation of five colleagues found all five active
+    together in 239 of 331 hours.
+    """
+    explicit = caps_policy._settings(account).get("active_hours")
+    if isinstance(explicit, (list, tuple)) and len(explicit) == 2:
+        return int(explicit[0]), int(explicit[1])
+
+    from app.safety import cluster
+
+    return cluster.schedule_window(account_id, base=caps_policy.DEFAULT_ACTIVE_HOURS)
 
 
 def _reason_for(action: str, stage: program.Stage) -> str:
