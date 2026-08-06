@@ -163,3 +163,29 @@ class AccountRateLimiter:
         pipe.zcount(key, now - WEEK_SECONDS, now)
         hour_used, day_used, week_used = await pipe.execute()
         return {"hour_used": hour_used, "day_used": day_used, "week_used": week_used}
+
+
+def get_limiter():
+    """
+    The process-wide limiter, or ``None`` if Redis is unreachable.
+
+    Lives here rather than in one worker module because *every* path that can
+    reach LinkedIn has to share one set of counters — a second limiter, or a
+    path that quietly runs without one, means the cap is not a cap. Callers
+    treat ``None`` as "cannot prove safety, so do nothing".
+    """
+    import logging
+
+    try:
+        import redis.asyncio as aioredis
+
+        from app.config import settings
+
+        return AccountRateLimiter(
+            aioredis.from_url(settings.redis_url, decode_responses=True)
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Rate limiter unavailable, capped work will not run: %s", exc
+        )
+        return None

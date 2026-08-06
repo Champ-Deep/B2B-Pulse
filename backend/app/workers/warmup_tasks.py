@@ -142,19 +142,17 @@ async def _active_accounts(db) -> list:
 
 def _rate_limiter():
     """
-    The global per-account limiter.
+    The global per-account limiter, shared with the engagement pipeline.
 
     Returns None if Redis is unreachable, which the runner treats as "cannot
     prove safety, so do nothing" — failing closed is the only sane default for
     a component whose job is to stop over-sending.
+
+    It matters that this is the *same* limiter the tracked-page pipeline uses.
+    Warm-up activity and pipeline engagement both spend one real LinkedIn
+    account's daily allowance, so two independent counters would let a single
+    account do a full warm-up day *and* a full pipeline day.
     """
-    try:
-        import redis.asyncio as aioredis
+    from app.safety.rate_policy import get_limiter
 
-        from app.config import settings
-        from app.safety.rate_policy import AccountRateLimiter
-
-        return AccountRateLimiter(aioredis.from_url(settings.redis_url, decode_responses=True))
-    except Exception as exc:
-        logger.warning("Rate limiter unavailable, warm-up will not act: %s", exc)
-        return None
+    return get_limiter()

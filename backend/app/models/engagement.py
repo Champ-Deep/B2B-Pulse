@@ -19,6 +19,13 @@ class ActionStatus(str, enum.Enum):
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     FAILED = "failed"
+    # Deliberately not performed: the safety gate refused it at execution time
+    # (account paused, stage locked, health degraded, cap reached). Distinct
+    # from FAILED because nothing went wrong — the system did its job. Keeping
+    # them apart matters twice: the retry sweeper must not re-queue a refusal
+    # into the very state that caused it, and a refusal must not read as a
+    # failure in the health funnel.
+    SKIPPED = "skipped"
 
 
 class EngagementAction(Base):

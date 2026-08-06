@@ -62,7 +62,15 @@ async def _schedule_engagements(post_id: str, tracked_page_id: str):
         is_weekend = now.weekday() >= 5  # Saturday=5, Sunday=6
 
         from app.safety import cluster
+        from app.safety.rate_policy import get_limiter
         from app.warmup import gate
+
+        # Read-only here: the gate consults usage so we don't queue work that
+        # has no chance of running, but the slot itself is taken at execution
+        # time in ``_refuse_if_unsafe``. Reserving at schedule time would let a
+        # burst of scheduled work claim the whole day's allowance and then leak
+        # it whenever the work didn't run.
+        limiter = get_limiter()
 
         # --- Cluster sampling ---
         #
@@ -167,7 +175,9 @@ async def _schedule_engagements(post_id: str, tracked_page_id: str):
             comment_cap = 60 if risk == "aggro" else 20
 
             # --- Create like action ---
-            like_gate = await gate.check(db, sub.user_id, "like", account=account)
+            like_gate = await gate.check(
+                db, sub.user_id, "like", account=account, rate_limiter=limiter
+            )
             if sub.auto_like and not like_gate:
                 logger.info(
                     "Skipping like for user %s: %s", sub.user_id, like_gate.reason
@@ -202,7 +212,9 @@ async def _schedule_engagements(post_id: str, tracked_page_id: str):
             # Comments are gated harder than likes in practice, because they
             # unlock two stages later in the programme: an account can be
             # liking for a week before it is allowed to say anything.
-            comment_gate = await gate.check(db, sub.user_id, "comment", account=account)
+            comment_gate = await gate.check(
+                db, sub.user_id, "comment", account=account, rate_limiter=limiter
+            )
             if sub.auto_comment and not comment_gate:
                 logger.info(
                     "Skipping comment for user %s: %s", sub.user_id, comment_gate.reason
@@ -347,6 +359,57 @@ async def _lookup_engagement_meta(engagement_action_id: str):
         return (user_id, platform.value)
 
 
+async def _refuse_if_unsafe(db, action, gate_action: str) -> str | None:
+    """
+    Re-run the safety gate and take a rate-limit slot, at execution time.
+
+    Returns ``None`` when the action may proceed, or a human-readable reason
+    when it may not — "why did nothing happen for Dana today" is a question
+    someone will ask, and the answer belongs on the row.
+
+    Fails closed throughout. A LinkedIn account is worth far more than one
+    like, so anything we cannot verify — no connected account, no reachable
+    limiter, an unexpected error in the gate itself — is a refusal.
+    """
+    from app.safety.rate_policy import get_limiter
+    from app.warmup import gate as warmup_gate
+
+    try:
+        account = await warmup_gate.account_for_user(db, action.user_id)
+        if account is None:
+            return "no active LinkedIn account is connected for this user"
+
+        limiter = get_limiter()
+        if limiter is None:
+            # Without the shared counters we cannot tell whether this account
+            # has already spent its day between the warm-up runner and this
+            # pipeline. Guessing in the permissive direction is how caps stop
+            # being caps.
+            return "rate limiter unavailable, so caps cannot be enforced"
+
+        decision = await warmup_gate.check(
+            db, action.user_id, gate_action, account=account, rate_limiter=limiter
+        )
+        if not decision:
+            return decision.reason
+
+        from app.safety import health as health_module
+
+        report = await health_module.account_health(db, account)
+        if not await warmup_gate.consume(
+            db, account, gate_action, limiter, throttle=report.throttle
+        ):
+            return f"{gate_action} cap reached — no slot available right now"
+
+    except Exception as exc:
+        logger.warning(
+            "Safety gate errored for action %s, refusing: %s", action.id, exc
+        )
+        return f"safety gate could not be evaluated ({exc})"
+
+    return None
+
+
 async def _execute_engagement(engagement_action_id: str):
     import uuid
 
@@ -370,6 +433,37 @@ async def _execute_engagement(engagement_action_id: str):
         if action.status != ActionStatus.PENDING:
             logger.info(
                 f"Action {engagement_action_id} already processed (status: {action.status})"
+            )
+            return
+
+        # --- The safety gate, at the moment of acting ---
+        #
+        # The scheduler already asked the gate before creating this row, but
+        # that answer is stale by the time we get here. Between scheduling and
+        # execution sit the stagger, the inter-user spacing and the quiet-hours
+        # offset, which together can be nine hours or more. In that window an
+        # operator may have hit the console's stop button, the acceptance
+        # governor may have dropped the account into danger, a challenge may
+        # have been detected, or the account may have been demoted a stage.
+        #
+        # None of that reached queued work before, which made the console's
+        # "pause everything" button a lie: it set the flag and the already-
+        # queued likes went out anyway.
+        #
+        # This is also where the rate-limit slot is taken. It has to be here
+        # rather than at scheduling time, or a burst of scheduled work would
+        # reserve the whole day's allowance up front and leak it whenever the
+        # work didn't run.
+        gate_action = "like" if action.action_type == ActionType.LIKE else "comment"
+        refusal = await _refuse_if_unsafe(db, action, gate_action)
+        if refusal is not None:
+            action.status = ActionStatus.SKIPPED
+            action.error_message = refusal
+            action.completed_at = datetime.now(UTC)
+            await db.commit()
+            logger.info(
+                "Skipping %s %s at execution time: %s",
+                gate_action, engagement_action_id, refusal,
             )
             return
 
