@@ -37,7 +37,7 @@ from app.transports.base import (
     TransportResult,
     TransportUnavailable,
 )
-from app.transports.fingerprints import generate_fingerprint
+from app.transports.fingerprints import generate_fingerprint, is_stale, li_track
 
 logger = logging.getLogger(__name__)
 
@@ -102,9 +102,23 @@ class MobileAPITransport:
     # ------------------------------------------------------------------
 
     def _fingerprint(self, account: Any) -> dict:
+        """
+        The account's client identity.
+
+        A fingerprint persisted by an older catalogue version is regenerated
+        rather than used: the v1 blobs paired a native-app user-agent with a
+        browser TLS handshake, so serving one is worse than having none.
+        Regeneration is deterministic from the account id, so the replacement is
+        itself stable.
+        """
         fp = getattr(account, "device_fingerprint", None)
-        if fp:
+        if fp and not is_stale(fp):
             return fp
+        if fp:
+            logger.info(
+                "Regenerating a stale device fingerprint for account %s",
+                getattr(account, "id", "unknown"),
+            )
         return generate_fingerprint(str(getattr(account, "id", "unknown")))
 
     def build_session(self, account: Any):
@@ -130,20 +144,16 @@ class MobileAPITransport:
         headers.update(
             {
                 "user-agent": fp["user_agent"],
-                "accept-language": fp.get("locale", "en_US").replace("_", "-"),
-                "x-li-device-id": fp["device_id"],
-                "x-li-track": json.dumps(
-                    {
-                        "clientVersion": fp["app_version"],
-                        "osName": fp["platform"],
-                        "osVersion": fp["os_version"],
-                        "deviceModel": fp["device_model"],
-                        "displayDensity": 3.0,
-                    },
-                    separators=(",", ":"),
+                "accept-language": fp.get(
+                    "accept_language", fp.get("locale", "en_US").replace("_", "-")
                 ),
+                "x-li-device-id": fp["device_id"],
+                "x-li-track": json.dumps(li_track(fp), separators=(",", ":")),
             }
         )
+        # Chromium sends UA client hints; Safari sends none. Faking them for
+        # Safari, or omitting them for Chrome, contradicts the user-agent.
+        headers.update(fp.get("client_hints") or {})
         # Voyager's CSRF check: header must equal the JSESSIONID cookie value.
         if creds.get("jsessionid"):
             headers["csrf-token"] = creds["jsessionid"]
@@ -158,7 +168,10 @@ class MobileAPITransport:
             proxies = {"http": proxy["url"], "https": proxy["url"]}
 
         return cffi_requests.Session(
-            impersonate=fp.get("tls_impersonate", "chrome120"),
+            # No default: a fingerprint without a TLS target is a bug, and
+            # silently falling back to some other browser's handshake is
+            # exactly the incoherence this module exists to prevent.
+            impersonate=fp["tls_impersonate"],
             headers=headers,
             cookies=cookies,
             proxies=proxies,

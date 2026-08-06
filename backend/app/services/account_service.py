@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import decrypt_value
 from app.models.integration import IntegrationAccount, Platform
-from app.transports.fingerprints import generate_fingerprint
+from app.transports.fingerprints import generate_fingerprint, is_stale
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,11 @@ class LiveAccount:
         self.user_id = str(record.user_id)
         self.org_id = org_id
         self.auth_blob = auth_blob
-        self.device_fingerprint = record.device_fingerprint or generate_fingerprint(str(record.id))
+        self.device_fingerprint = (
+            record.device_fingerprint
+            if not is_stale(record.device_fingerprint)
+            else generate_fingerprint(str(record.id))
+        )
         self.proxy = record.proxy
         self.record = record
 
@@ -169,9 +173,13 @@ def ensure_fingerprint(record: IntegrationAccount) -> dict:
 
     Derived from the account id rather than randomly, so it survives restarts
     and is identical whether it was persisted yet or not. Device consistency is
-    something LinkedIn ties trust to, so this must never be regenerated.
+    something LinkedIn ties trust to, so this is never regenerated on a whim.
+
+    The one exception is a fingerprint from a superseded catalogue version:
+    those are the incoherent ones, and keeping a consistent-but-detectable
+    identity is worse than the one-time change of presenting a coherent one.
     """
-    if not record.device_fingerprint:
+    if is_stale(record.device_fingerprint):
         record.device_fingerprint = generate_fingerprint(str(record.id))
     return record.device_fingerprint
 
