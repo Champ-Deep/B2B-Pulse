@@ -1,0 +1,46 @@
+# TLS termination for the API.
+#
+# Caddy is here rather than nginx for one reason: it obtains and renews the
+# Let's Encrypt certificate on its own. A self-hosted deployment that needs a
+# human to remember certbot every ninety days will eventually be down for a day
+# because nobody did.
+#
+# The frontend is NOT served here — it lives on a static host. This block only
+# has to answer for the API.
+
+{$API_DOMAIN} {
+	encode zstd gzip
+
+	# CORS is handled by the application (CORS_ORIGINS), not here, so there is
+	# exactly one place to change when the frontend moves. Duplicating it would
+	# mean a stale allow-list surviving in a file nobody thinks to look at.
+
+	handle /health {
+		reverse_proxy api:8000
+	}
+
+	handle {
+		reverse_proxy api:8000 {
+			header_up X-Real-IP {remote_host}
+			# Account connection can involve a LinkedIn challenge and a browser
+			# fallback, both of which are slow. The default 30s cuts them off
+			# mid-flight and the user sees a 502 on a request that was working.
+			transport http {
+				read_timeout 120s
+			}
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

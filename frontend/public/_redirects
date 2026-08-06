@@ -1,0 +1,7 @@
+# Netlify / Cloudflare Pages SPA fallback.
+#
+# The app is client-routed, so /console and /accounts do not exist as files.
+# Without this, a static host 404s on any deep link — which shows up as
+# "refreshing the page logs me out", because Clerk's redirect lands on a route
+# the host has never heard of.
+/*  /index.html  200

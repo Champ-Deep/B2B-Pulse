@@ -1,6 +1,5 @@
 """Test fixtures for B2B Pulse backend tests."""
 
-import asyncio
 import json
 import os
 import time
@@ -27,10 +26,9 @@ _is_sqlite = "sqlite" in TEST_DATABASE_URL
 if _is_sqlite:
     _connect_args["check_same_thread"] = False
 
-engine = create_async_engine(TEST_DATABASE_URL, echo=False, connect_args=_connect_args)
-TestSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-# Map PostgreSQL-specific types to SQLite equivalents for testing
+# Map PostgreSQL-specific types to SQLite equivalents. Only needed on the
+# SQLite path -- against Postgres the real types are used, which is the point of
+# being able to run there.
 if _is_sqlite:
     @event.listens_for(Base.metadata, "column_reflect")
     def _column_reflect(inspector, table, column_info):
@@ -45,27 +43,50 @@ if _is_sqlite:
     SQLiteTypeCompiler.visit_UUID = lambda self, type_, **kw: "TEXT"  # type: ignore[attr-defined]
 
 
-@pytest.fixture(scope="session")
-def event_loop():
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
 @pytest.fixture(autouse=True)
 async def setup_db():
-    """Create tables before each test, drop after."""
-    async with engine.begin() as conn:
+    """
+    A fresh schema per test, on an engine built inside this test's event loop.
+
+    The engine is created here rather than at import time, with ``NullPool``, so
+    no connection outlives the loop that opened it. pytest-asyncio 1.x ignores
+    an ``event_loop`` fixture override and gives every test its own loop, so a
+    pooled connection from the first test ends up bound to a loop that has since
+    closed.
+
+    SQLite tolerated that; Postgres does not. Which meant the suite could only
+    ever run against SQLite — a database this app does not use, and one that
+    models neither JSONB nor native enums. Both appear in the migrations, so
+    "green on SQLite" was never evidence the schema worked.
+
+    Point ``TEST_DATABASE_URL`` at a Postgres instance to run against the real
+    thing:
+
+        TEST_DATABASE_URL=postgresql+asyncpg://user@localhost/b2bpulse_test pytest
+    """
+    from sqlalchemy.pool import NullPool
+
+    test_engine = create_async_engine(
+        TEST_DATABASE_URL, echo=False, connect_args=_connect_args, poolclass=NullPool
+    )
+    session_factory = async_sessionmaker(
+        test_engine, class_=AsyncSession, expire_on_commit=False
+    )
+
+    async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    yield
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
+    try:
+        yield session_factory
+    finally:
+        async with test_engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
+        await test_engine.dispose()
 
 
 @pytest.fixture
-async def db() -> AsyncSession:
+async def db(setup_db) -> AsyncSession:
     """Get a test database session."""
-    async with TestSessionLocal() as session:
+    async with setup_db() as session:
         yield session
 
 
