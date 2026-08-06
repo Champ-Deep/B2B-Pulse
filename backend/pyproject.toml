@@ -56,6 +56,12 @@ dev = [
     "httpx>=0.27.0",
     "aiosqlite>=0.20.0",
     "ruff>=0.7.0",
+    # The limiter's decide-and-consume step is a Lua script, because doing it
+    # in Python is a check-then-act race that overruns the cap ~3x under
+    # concurrency. fakeredis needs lupa to execute Lua, so without these the
+    # limiter's concurrency tests silently cannot run.
+    "fakeredis>=2.20.0",
+    "lupa>=2.0",
 ]
 
 [build-system]

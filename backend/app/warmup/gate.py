@@ -197,14 +197,20 @@ async def consume(db, account, action: str, rate_limiter, *, throttle: float = 1
 
     warm_action = ACTION_MAP.get(action, action)
     caps = caps_policy.caps_for(account, warm_action, throttle=throttle)
-    decision = await rate_limiter.check_and_consume(
-        str(account.id),
-        warm_action,
-        per_hour=caps.per_hour,
-        per_day=caps.per_day,
-        per_week=caps.per_week,
-        cooldown_seconds=caps.cooldown_seconds,
-    )
+    try:
+        decision = await rate_limiter.check_and_consume(
+            str(account.id),
+            warm_action,
+            per_hour=caps.per_hour,
+            per_day=caps.per_day,
+            per_week=caps.per_week,
+            cooldown_seconds=caps.cooldown_seconds,
+        )
+    except Exception as exc:
+        # A limiter that cannot answer is not permission. Refusing costs one
+        # like; assuming headroom we can't verify costs the account.
+        logger.warning("Rate limiter could not answer for %s: %s", account.id, exc)
+        return False
     return bool(decision.allowed)
 
 

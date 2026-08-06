@@ -46,14 +46,109 @@ class RateDecision:
         return self.allowed
 
 
+# The decision and the consumption, as one indivisible server-side step.
+#
+# Doing this in Python — read the counts, decide, then write — is a
+# check-then-act race, and not a theoretical one. Under eight Celery workers
+# handling a burst, every caller reads the same pre-consumption count and every
+# caller concludes it has headroom. Measured against this module's own test
+# harness: 60 actions allowed against a cap of 20.
+#
+# That is the worst possible place for a race. The weekly invitation cap exists
+# precisely because LinkedIn restricts accounts near ~100 invitations a week, so
+# a limiter that can be overrun 3x under load is not a limiter at all.
+#
+# Redis executes a script atomically, so no other client can observe or modify
+# the sorted set between the count and the ZADD.
+_CHECK_AND_CONSUME_LUA = """
+local key = KEYS[1]
+local seq_key = KEYS[2]
+local now = tonumber(ARGV[1])
+local hour_start = tonumber(ARGV[2])
+local day_start = tonumber(ARGV[3])
+local week_start = tonumber(ARGV[4])
+local per_hour = tonumber(ARGV[5])
+local per_day = tonumber(ARGV[6])
+local per_week = tonumber(ARGV[7])
+local cooldown = tonumber(ARGV[8])
+local week_seconds = tonumber(ARGV[9])
+
+redis.call('ZREMRANGEBYSCORE', key, 0, week_start)
+
+local hour_used = redis.call('ZCOUNT', key, hour_start, now)
+local day_used  = redis.call('ZCOUNT', key, day_start, now)
+local week_used = redis.call('ZCARD', key)
+
+if cooldown > 0 then
+  local newest = redis.call('ZRANGE', key, -1, -1, 'WITHSCORES')
+  if newest[2] then
+    local elapsed = now - tonumber(newest[2])
+    if elapsed < cooldown then
+      return {0, 'cooldown', hour_used, day_used, week_used, cooldown - elapsed}
+    end
+  end
+end
+
+if per_week > 0 and week_used >= per_week then
+  -- A rolling window frees up continuously: retry when the oldest entry ages
+  -- out, not in a flat week.
+  local retry = week_seconds
+  local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+  if oldest[2] then
+    retry = math.max(60, tonumber(oldest[2]) + week_seconds - now)
+  end
+  return {0, 'weekly_cap', hour_used, day_used, week_used, retry}
+end
+
+if per_day > 0 and day_used >= per_day then
+  return {0, 'daily_cap', hour_used, day_used, week_used, 86400}
+end
+
+if per_hour > 0 and hour_used >= per_hour then
+  return {0, 'hourly_cap', hour_used, day_used, week_used, 3600}
+end
+
+-- Allowed: consume one slot. The member must be unique, or two actions in the
+-- same second would collapse into a single sorted-set entry and the cap would
+-- silently under-count.
+local seq = redis.call('INCR', seq_key)
+redis.call('ZADD', key, now, now .. ':' .. seq)
+redis.call('EXPIRE', key, week_seconds)
+redis.call('EXPIRE', seq_key, week_seconds)
+
+return {1, 'ok', hour_used + 1, day_used + 1, week_used + 1, 0}
+"""
+
+
+def _text(value) -> str:
+    """Lua returns bulk strings, which redis-py may hand back as bytes."""
+    return value.decode() if isinstance(value, bytes) else str(value)
+
+
+class RateLimiterUnavailable(RuntimeError):
+    """
+    The limiter could not evaluate a cap.
+
+    Raised rather than returning a refusal so no caller can mistake "Redis is
+    unreachable" for "you are over your cap" — one is a transient outage the
+    operator should see, the other is normal operation.
+    """
+
+
 class AccountRateLimiter:
     """
     Redis-backed sliding-window limiter keyed per (account, action).
 
     One sorted set per (account, action) holds the unix timestamps of allowed
     actions, scored by timestamp. Hourly usage = members in the last hour;
-    daily usage = members in the last day; cooldown = time since the newest
-    member. Old members are trimmed on every check so the set stays bounded.
+    daily usage = members in the last day; weekly usage = the whole (trimmed)
+    set. Old members are trimmed on every check so the set stays bounded.
+
+    Concurrency
+    -----------
+    The check and the consumption happen inside one Lua script, so they are
+    atomic with respect to every other worker. This is load-bearing rather than
+    tidy: see the comment above :data:`_CHECK_AND_CONSUME_LUA`.
     """
 
     def __init__(self, redis_client, clock: Optional[Callable[[], float]] = None):
@@ -64,6 +159,7 @@ class AccountRateLimiter:
         """
         self.redis = redis_client
         self._clock = clock or time.time
+        self._script = None
 
     @staticmethod
     def _key(account_id: str, action: str) -> str:
@@ -87,71 +183,74 @@ class AccountRateLimiter:
         ``per_week`` matters most for invitations: LinkedIn's real invitation
         limit is weekly, so an account can sit comfortably under its daily cap
         every day and still be restricted by Friday.
+
+        Raises:
+            RateLimiterUnavailable: Redis could not answer. Deliberately an
+                exception rather than a refusal, so no caller can read an
+                outage as "over cap", and a limiter that has stopped working
+                can never silently allow.
         """
         now = int(self._clock())
         key = self._key(account_id, action)
-        hour_start = now - HOUR_SECONDS
-        day_start = now - DAY_SECONDS
-        week_start = now - WEEK_SECONDS
 
-        # Retain a full week so the weekly window can be evaluated, then read
-        # usage across all three windows plus the newest timestamp.
-        trim_pipe = self.redis.pipeline()
-        trim_pipe.zremrangebyscore(key, 0, week_start)
-        trim_pipe.zcount(key, hour_start, now)          # hourly usage
-        trim_pipe.zcount(key, day_start, now)           # daily usage
-        trim_pipe.zcard(key)                            # weekly usage (post-trim)
-        trim_pipe.zrange(key, -1, -1, withscores=True)  # newest entry
-        _, hour_used, day_used, week_used, newest = await trim_pipe.execute()
-
-        def decision(reason: str, retry_after: int) -> RateDecision:
-            return RateDecision(
-                allowed=False,
-                reason=reason,
-                hour_used=hour_used,
-                day_used=day_used,
-                week_used=week_used,
-                retry_after_seconds=retry_after,
+        try:
+            raw = await self._eval(
+                key,
+                now,
+                per_hour=per_hour,
+                per_day=per_day,
+                per_week=per_week,
+                cooldown_seconds=cooldown_seconds,
             )
+        except RateLimiterUnavailable:
+            raise
+        except Exception as exc:  # a limiter that cannot answer must not allow
+            raise RateLimiterUnavailable(str(exc)) from exc
 
-        # Cooldown: seconds since the most recent allowed action.
-        if cooldown_seconds and newest:
-            last_ts = int(newest[0][1])
-            elapsed = now - last_ts
-            if elapsed < cooldown_seconds:
-                return decision("cooldown", cooldown_seconds - elapsed)
-
-        if per_week and week_used >= per_week:
-            # Retry when the oldest entry in the window ages out, not in a
-            # flat week -- a rolling window frees up continuously.
-            oldest = await self.redis.zrange(key, 0, 0, withscores=True)
-            retry = WEEK_SECONDS
-            if oldest:
-                retry = max(60, int(oldest[0][1]) + WEEK_SECONDS - now)
-            return decision("weekly_cap", retry)
-
-        if per_day and day_used >= per_day:
-            return decision("daily_cap", DAY_SECONDS)
-
-        if per_hour and hour_used >= per_hour:
-            return decision("hourly_cap", HOUR_SECONDS)
-
-        # Allowed -> consume one slot. Member must be unique; use a monotonic
-        # suffix so two actions in the same second don't collapse to one entry.
-        member = f"{now}:{await self.redis.incr(f'{key}:seq')}"
-        consume_pipe = self.redis.pipeline()
-        consume_pipe.zadd(key, {member: now})
-        consume_pipe.expire(key, WEEK_SECONDS)
-        consume_pipe.expire(f"{key}:seq", WEEK_SECONDS)
-        await consume_pipe.execute()
-
+        allowed, reason, hour_used, day_used, week_used, retry_after = raw
         return RateDecision(
-            allowed=True,
-            reason="ok",
-            hour_used=hour_used + 1,
-            day_used=day_used + 1,
-            week_used=week_used + 1,
+            allowed=bool(int(allowed)),
+            reason=_text(reason),
+            hour_used=int(hour_used),
+            day_used=int(day_used),
+            week_used=int(week_used),
+            retry_after_seconds=int(retry_after),
         )
+
+    async def _eval(
+        self,
+        key: str,
+        now: int,
+        *,
+        per_hour: int,
+        per_day: int,
+        per_week: int,
+        cooldown_seconds: int,
+    ):
+        """Run the atomic decide-and-consume script."""
+        args = [
+            now,
+            now - HOUR_SECONDS,
+            now - DAY_SECONDS,
+            now - WEEK_SECONDS,
+            per_hour or 0,
+            per_day or 0,
+            per_week or 0,
+            cooldown_seconds or 0,
+            WEEK_SECONDS,
+        ]
+        keys = [key, f"{key}:seq"]
+
+        # register_script uses EVALSHA with an EVAL fallback, so the script body
+        # crosses the wire once per server rather than once per action.
+        if self._script is None:
+            register = getattr(self.redis, "register_script", None)
+            if register is not None:
+                self._script = register(_CHECK_AND_CONSUME_LUA)
+
+        if self._script is not None:
+            return await self._script(keys=keys, args=args)
+        return await self.redis.eval(_CHECK_AND_CONSUME_LUA, len(keys), *keys, *args)
 
     async def usage(self, account_id: str, action: str) -> dict:
         """Read current hourly/daily/weekly usage without consuming a slot."""

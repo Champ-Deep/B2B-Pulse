@@ -286,14 +286,19 @@ async def _consume_slot(account, action: str, rate_limiter, throttle: float) -> 
         return os.getenv("ALLOW_UNCAPPED_SENDING", "").lower() == "true"
 
     caps = caps_policy.caps_for(account, action, throttle=throttle)
-    decision = await rate_limiter.check_and_consume(
-        str(account.id),
-        action,
-        per_hour=caps.per_hour,
-        per_day=caps.per_day,
-        per_week=caps.per_week,
-        cooldown_seconds=caps.cooldown_seconds,
-    )
+    try:
+        decision = await rate_limiter.check_and_consume(
+            str(account.id),
+            action,
+            per_hour=caps.per_hour,
+            per_day=caps.per_day,
+            per_week=caps.per_week,
+            cooldown_seconds=caps.cooldown_seconds,
+        )
+    except Exception as exc:
+        # Same rule as a missing limiter: an outage is not headroom.
+        logger.warning("Rate limiter could not answer for %s: %s", account.id, exc)
+        return False
     return bool(decision.allowed)
 
 
