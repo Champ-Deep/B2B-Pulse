@@ -1,21 +1,74 @@
 # B2B Pulse
 
-**Social Engagement Automation Platform** — Automate LinkedIn likes, AI-generated comments, and coordinate team engagement across multiple organizations.
+**Multi-account LinkedIn presence, run safely.** A handful of real people's
+LinkedIn accounts, one operator with a view across all of them, and a safety
+model built around the thing that actually gets accounts restricted.
+
+## Deploying it
+
+- **[Deployment runbook](docs/INTERN_DEPLOY_RUNBOOK.md)** — step by step, for a
+  first-time deploy. Start here.
+- **[Operator guide](docs/DEPLOYMENT.md)** — backups, upgrades, the stop button,
+  and what to expect once accounts are connected.
+- `./scripts/verify_deployment.sh` — read-only check answering "is this
+  deployment actually working", including whether the rate caps really hold.
 
 ## Overview
 
-B2B Pulse helps B2B teams amplify their social presence by automatically engaging with tracked LinkedIn company pages. When a tracked page publishes a new post, the platform polls for it, generates personalized AI comments per user, and orchestrates likes and comments with human-like stagger delays.
+Each connected account is warmed up through a staged programme before it may do
+anything consequential, engages with tracked company pages in a paced and
+deliberately uneven rhythm, and only reaches connection requests after three
+weeks. An admin console gives one person a view across every account, plus the
+two questions no single account can answer about itself: how correlated the
+group's behaviour is, and how much cluster headroom is left.
 
-### Key Features
+### Key features
 
-- **LinkedIn OAuth SSO** — Single sign-in with LinkedIn (also connects the automation integration)
-- **Multi-org with sub-teams** — Independent organizations, each with sub-teams and team leaders
-- **AI comment generation** — Two-pass LLM pipeline (generate + review) via OpenRouter
-- **Engagement automation** — Auto-like and auto-comment with configurable stagger delays
-- **Tracked pages** — Monitor LinkedIn company pages for new posts, auto-poll on schedule
-- **Team invites** — Shareable invite links (org-wide or team-specific)
-- **Audit log** — Full engagement history with CSV export
-- **Platform admin** — Super-admin dashboard for managing all orgs
+- **Staged warm-up** — Six stages, 21 days minimum. A new account may like and
+  nothing else for its first two days; commenting unlocks two stages later;
+  invitations come last.
+- **Caps that hold** — Per-account hourly, daily and **rolling weekly** limits,
+  enforced atomically in Redis so they survive concurrency, under a platform
+  ceiling no configuration can exceed.
+- **Acceptance governor** — Throttles as acceptance rate falls, and suspends
+  invitations below the line LinkedIn treats as spam.
+- **Cluster safety** — Samples which accounts engage with any given post, gives
+  each its own working hours, and measures behavioural correlation org-wide.
+- **Personas with org inheritance** — An org-level direction each person can
+  override in their own voice; guardrails accumulate and never subtract.
+- **Two-queue approval** — Engagement is bulk-approved org-wide; messages and
+  invitations per account, because they go out under one person's name.
+- **Coherent transport fingerprints** — TLS profile, user-agent, client hints
+  and platform chosen as one unit, matching the credentials actually in use.
+- **Admin console** — Every account's stage, health, funnel and headroom in one
+  view, with a stop button that reaches already-queued work.
+
+### The safety model, briefly
+
+The research behind this contradicts what most vendors pitch, so it's worth
+stating outright:
+
+- LinkedIn's invitation limit is roughly **100 per rolling week**, and it is
+  **identical for Free, Premium and Sales Navigator**. Premium buys no more.
+- **Acceptance rate matters more than volume.** Below ~15% an account is treated
+  as spam however modest its numbers, and a meaningful share of restricted
+  accounts were inside the published limits the whole time.
+
+So caps here are a ceiling rather than a target, measured behaviour scales them
+*down*, and merging two controls never loosens either one.
+
+Simulated behaviour for a freshly connected account: first invitation on day 15,
+peak 10 per day, peak 50 in any rolling week, quiet days throughout, activity
+confined to waking hours.
+
+### Also here
+
+- **Multi-org with sub-teams** — Independent organizations, each with sub-teams
+  and team leaders
+- **AI copy** — Two-pass generate-and-review via OpenRouter, with a quality gate
+  that blocks generic openers and booking links in first contact
+- **Tracked pages** — Monitor LinkedIn company pages, auto-poll on schedule
+- **Team invites**, **audit log** with CSV export, **platform admin**
 
 ---
 
@@ -44,7 +97,7 @@ B2B Pulse helps B2B teams amplify their social presence by automatically engagin
 
 | Service | Technology | Purpose |
 |---------|-----------|---------|
-| Frontend | React 18 + Vite + Tailwind CSS | SPA with LinkedIn OAuth, team management |
+| Frontend | React 18 + Vite + Tailwind CSS | SPA with Clerk auth, admin console, approval queues |
 | Backend | FastAPI + SQLAlchemy async | REST API, OAuth flows, business logic |
 | Database | PostgreSQL 16 | Persistent storage |
 | Cache | Redis 7 | Celery broker, OAuth state, poll status |
@@ -55,21 +108,26 @@ B2B Pulse helps B2B teams amplify their social presence by automatically engagin
 
 ## Authentication Flow
 
-B2B Pulse uses **LinkedIn OAuth 2.0 (OpenID Connect)** as the sole authentication method. A single sign-in both authenticates the user and connects their LinkedIn integration for automation.
+**Clerk** is the identity provider. Logging in and connecting a LinkedIn
+account are now two separate things, which they should always have been: an
+operator can administer the org without any LinkedIn account of their own, and
+disconnecting an account doesn't log anybody out.
 
 ```
-User clicks "Sign in with LinkedIn"
-  → Frontend calls GET /api/auth/linkedin
-  → Backend returns LinkedIn OAuth URL (with state stored in Redis)
-  → User authorizes on LinkedIn
-  → LinkedIn redirects to GET /api/auth/linkedin/callback
-  → Backend exchanges code for token, fetches profile
-  → Creates/finds user, upserts IntegrationAccount with encrypted OAuth token
-  → Redirects to frontend: /auth/callback#access_token=...&refresh_token=...
-  → Frontend stores JWT tokens in localStorage
+User signs in through Clerk
+  → Frontend holds a Clerk session token (RS256)
+  → Every API call carries it as a Bearer token
+  → Backend verifies the signature against Clerk's JWKS
+  → First call provisions the local User and Org just in time
+  → RequestContext(user, org_id) scopes every query
 ```
 
-**Invite flow:** When a user has an invite code, it's embedded in the OAuth state. On callback, the user joins the invite's org (and team, if specified).
+LinkedIn OAuth still exists, but only to connect an *integration*
+(`/api/integrations/linkedin/*`) — never to log in.
+
+**Invite flow:** an invite code is redeemed against
+`POST /api/auth/redeem-invite` once signed in, joining the invite's org and
+team.
 
 ---
 
@@ -321,7 +379,7 @@ b2b-pulse/
 ├── backend/
 │   ├── app/
 │   │   ├── api/              # Route handlers
-│   │   │   ├── auth.py       # LinkedIn OAuth login
+│   │   │   ├── auth.py       # Clerk session auth + invite redemption
 │   │   │   ├── integrations.py # OAuth integrations
 │   │   │   ├── org.py        # Org management, invites
 │   │   │   ├── teams.py      # Sub-team CRUD
